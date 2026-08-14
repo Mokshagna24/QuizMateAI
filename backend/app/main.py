@@ -81,8 +81,9 @@ class TokenOut(BaseModel):
     user: dict
 
 class QuizRequest(BaseModel):
-    source_text: str = Field(min_length=20)
-    source_name: str
+    source_text: Optional[str] = None
+    source_name: Optional[str] = None
+    topic: Optional[str] = None
     count: int = Field(default=10, ge=1, le=20)
     question_type: Literal["MCQ", "True / False", "Short Answer", "Mixed"]
     difficulty: Literal["Easy", "Medium", "Hard", "Mixed"]
@@ -142,6 +143,24 @@ def load_topics():
         p.stem.replace("_", " ").title(): p.read_text(encoding="utf-8")
         for p in TOPICS_DIR.glob("*.txt")
     }
+def get_topic_source(topic: str):
+    data = load_topics()
+
+    # Exact match
+    if topic in data:
+        return topic, data[topic]
+
+    # Case-insensitive match
+    topic_lower = topic.strip().lower()
+
+    for name, text in data.items():
+        if name.lower() == topic_lower:
+            return name, text
+
+    raise HTTPException(
+        status_code=404,
+        detail=f"Topic '{topic}' was not found."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -385,8 +404,8 @@ def build_retrieval_queries(req: QuizRequest):
     return [
         f"Study material about {type_query}.",
         f"Study material suitable for {difficulty_query} quiz questions.",
-        "Most important examinable concepts and definitions in this document.",
-        "Processes, examples, relationships, comparisons, formulas, and key facts in this document.",
+        f"Most important examinable concepts and definitions in this study material.",
+        f"Processes, examples, relationships, comparisons, formulas, and key facts in this study material.",
     ]
 
 
@@ -408,18 +427,49 @@ def clean_json(raw: str):
     return raw
 
 def generate_questions(req: QuizRequest):
-    """
-    RAG pipeline:
-        document -> chunks -> nomic-embed-text -> vector similarity
-        -> relevant chunks -> Llama 3.2 -> new grounded questions
-    """
-    source_text = req.source_text.strip()
+
+    # ---------------------------------------------------------
+    # Determine the source: uploaded document OR predefined topic
+    # ---------------------------------------------------------
+
+    if req.topic:
+        source_name, source_text = get_topic_source(req.topic)
+
+    elif req.source_text:
+        source_text = req.source_text.strip()
+        source_name = req.source_name or "Uploaded Document"
+
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload a document or select/enter a topic."
+        )
 
     if len(source_text) < 100:
         raise HTTPException(
             status_code=400,
-            detail="The uploaded document does not contain enough readable study material.",
+            detail="The selected topic/document does not contain enough study material."
         )
+
+    # ---------------------------------------------------------
+    # Existing RAG pipeline continues from here
+    # ---------------------------------------------------------
+
+    index = build_rag_index(source_text, source_name)
+
+    retrieval_queries = build_retrieval_queries(req)
+
+    top_k = min(
+        max(8, req.count // 2 + 5),
+        15,
+        len(index["chunks"])
+    )
+
+    retrieved = retrieve_context(
+        index,
+        retrieval_queries,
+        top_k=top_k
+    )
 
     # Build/reuse local vector index.
     index = build_rag_index(source_text, req.source_name)
@@ -459,9 +509,9 @@ Generation (RAG).
 
 Create EXACTLY {req.count} NEW quiz questions.
 
-The document was chunked and searched using the local embedding model
+The study material was chunked and searched using the local embedding model
 nomic-embed-text:latest. The text below contains the retrieved evidence from
-the user's uploaded document.
+the user's selected study source.
 
 STRICT GROUNDING RULES:
 1. Use ONLY information explicitly supported by the RETRIEVED STUDY CONTEXT.
@@ -688,6 +738,7 @@ def quiz_submit(req: SubmitRequest, user=Depends(current_user)):
         "INSERT INTO results(user_id,topic,score,total,difficulty,created_at) VALUES(?,?,?,?,?,?)",
         (user["id"], req.source_name, score, total, req.difficulty, datetime.now().isoformat())
     )
+    
     con.commit()
     con.close()
     pct = round(score / total * 100) if total else 0
