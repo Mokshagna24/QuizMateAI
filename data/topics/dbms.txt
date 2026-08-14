@@ -1,0 +1,1 @@
+A database management system is software used to store, organize, retrieve, and manage data. A relational database stores information in tables made of rows and columns. SQL is used to query relational databases. Primary keys uniquely identify rows. Foreign keys establish relationships between tables. Normalization reduces data redundancy and improves consistency.

@@ -1,0 +1,1 @@
+An operating system manages computer hardware and provides services to applications. Important responsibilities include process management, memory management, file management, device management, and security. A process is a program in execution. Virtual memory allows a system to use disk space as an extension of RAM. Scheduling algorithms determine how processes receive CPU time.

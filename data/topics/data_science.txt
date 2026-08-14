@@ -1,0 +1,1 @@
+Data Science combines statistics, programming, domain knowledge, and machine learning to extract useful insights from data. A typical workflow includes problem definition, data collection, cleaning, exploratory data analysis, feature engineering, modeling, evaluation, and communication. Data visualization helps communicate patterns and trends.
