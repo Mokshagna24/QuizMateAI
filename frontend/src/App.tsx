@@ -46,7 +46,7 @@ function Layout({
   const links = [
     ["/dashboard", "Dashboard", Home],
     ["/topics", "Popular Topics", BookOpen],
-    ["/upload", "Upload PDF", Upload],
+    ["/upload", "Upload Notes", Upload],
     ["/summarize", "Summarize", FileText],
     ["/progress", "My Progress", BarChart3],
   ] as const;
@@ -309,7 +309,7 @@ function Dashboard({ user }: { user: User }) {
         </div>
       </div>
 
-      <div className="grid-3">
+      <div className="grid-4">
         <ActionCard
           icon={<Target />}
           title="Start a Quiz"
@@ -319,17 +319,25 @@ function Dashboard({ user }: { user: User }) {
         />
 
         <ActionCard
+          icon={<Sparkles />}
+          title="Generate from Topic"
+          text="Enter any topic and let AI create a fresh quiz."
+          button="Enter Topic"
+          onClick={() => nav("/generate-topic")}
+        />
+
+        <ActionCard
           icon={<Upload />}
           title="Upload Notes"
-          text="Turn your PDF notes into a personalized quiz."
-          button="Upload PDF"
+          text="Turn your PDF or DOCX notes into a personalized quiz."
+          button="Upload Notes"
           onClick={() => nav("/upload")}
         />
 
         <ActionCard
           icon={<FileText />}
-          title="Summarize PDF"
-          text="Turn long study material into quick revision notes."
+          title="Summarize Notes"
+          text="Turn long PDF or DOCX study material into quick revision notes."
           button="Summarize"
           onClick={() => nav("/summarize")}
         />
@@ -518,16 +526,97 @@ function Topics({
 }
 
 /* =========================================================
+   GENERATE FROM TOPIC
+========================================================= */
+
+function TopicGenerator({
+  onStart,
+}: {
+  onStart: (topic: string) => void;
+}) {
+  const [topic, setTopic] = useState("");
+  const [error, setError] = useState("");
+
+  const submit = () => {
+    const value = topic.trim();
+
+    if (value.length < 2) {
+      setError("Please enter a topic.");
+      return;
+    }
+
+    setError("");
+    onStart(value);
+  };
+
+  return (
+    <>
+      <PageTitle
+        title="✨ Generate a Quiz from Any Topic"
+        subtitle="Enter any subject or concept. QuizMate AI will create a fresh quiz for you."
+      />
+
+      <div className="config-card">
+        <div className="source-pill">
+          💡 AI Topic Generator
+        </div>
+
+        <h2>What do you want to learn?</h2>
+
+        <p className="muted">
+          Try topics like Machine Learning, Python, IoT,
+          Data Structures, Cloud Computing, or any subject you know.
+        </p>
+
+        <label>
+          Topic
+          <input
+            className="search"
+            value={topic}
+            onChange={(e) => {
+              setTopic(e.target.value);
+              if (error) setError("");
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") submit();
+            }}
+            placeholder="e.g. Machine Learning"
+            autoFocus
+          />
+        </label>
+
+        {error && (
+          <div className="error">
+            {error}
+          </div>
+        )}
+
+        <button
+          className="primary big"
+          disabled={!topic.trim()}
+          onClick={submit}
+        >
+          <Sparkles size={18} />
+          Continue to Quiz Settings
+        </button>
+      </div>
+    </>
+  );
+}
+
+/* =========================================================
    QUIZ CONFIGURATION
 ========================================================= */
 
 function QuizConfig({
   sourceText,
   sourceName,
+  topic,
   onQuiz,
 }: {
-  sourceText: string;
+  sourceText?: string;
   sourceName: string;
+  topic?: string;
   onQuiz: (
     q: Question[],
     name: string,
@@ -550,15 +639,23 @@ function QuizConfig({
       setLoading(true);
       setError("");
 
+      const payload: Record<string, any> = {
+        count,
+        question_type: type,
+        difficulty,
+      };
+
+      if (topic) {
+        payload.topic = topic;
+        payload.source_name = topic;
+      } else {
+        payload.source_text = sourceText;
+        payload.source_name = sourceName;
+      }
+
       const r = await api.post(
         "/api/quiz/generate",
-        {
-          source_text: sourceText,
-          source_name: sourceName,
-          count,
-          question_type: type,
-          difficulty,
-        }
+        payload
       );
 
       onQuiz(
@@ -964,7 +1061,7 @@ function Results({
 }
 
 /* =========================================================
-   UPLOAD PDF
+   UPLOAD NOTES (PDF / DOCX)
    IMPORTANT:
    Renamed from Upload -> UploadPDF
    to avoid conflict with lucide-react Upload icon.
@@ -1016,7 +1113,7 @@ function UploadPDF({
     } catch (e: any) {
       setError(
         e?.response?.data?.detail ||
-          "Could not read this PDF."
+          "Could not read this document."
       );
     } finally {
       setLoading(false);
@@ -1027,7 +1124,7 @@ function UploadPDF({
     <>
       <PageTitle
         title="📄 Turn Your Notes Into a Quiz"
-        subtitle="Upload a PDF and create questions from it."
+        subtitle="Upload a PDF or DOCX and create questions from it."
       />
 
       <div className="upload-card">
@@ -1038,12 +1135,12 @@ function UploadPDF({
         <h2>
           {file
             ? file.name
-            : "Drop your PDF here"}
+            : "Drop your PDF or DOCX here"}
         </h2>
 
         <p>
-          PDF only • Up to 10 MB •
-          Text-based PDFs work best
+          PDF or DOCX • Up to 10 MB •
+          Text-based PDFs and DOCX files work best
         </p>
 
         <label className="file-btn">
@@ -1051,7 +1148,7 @@ function UploadPDF({
 
           <input
             type="file"
-            accept=".pdf,application/pdf"
+            accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             onChange={(e) =>
               setFile(
                 e.target.files?.[0] ||
@@ -1068,7 +1165,7 @@ function UploadPDF({
             onClick={upload}
           >
             {loading
-              ? "Reading PDF..."
+              ? "Reading document..."
               : "Continue to Quiz Settings"}
           </button>
         )}
@@ -1147,14 +1244,14 @@ function Summarize() {
   return (
     <>
       <PageTitle
-        title="📝 AI PDF Summarizer"
-        subtitle="Turn long notes into clear revision material."
+        title="📝 AI Notes Summarizer"
+        subtitle="Turn long PDF or DOCX notes into clear revision material."
       />
 
       <div className="config-card">
         <input
           type="file"
-          accept=".pdf,application/pdf"
+          accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
           onChange={(e) =>
             setFile(
               e.target.files?.[0] ||
@@ -1182,7 +1279,7 @@ function Summarize() {
         >
           {loading
             ? "Creating summary..."
-            : "✨ Summarize PDF"}
+            : "✨ Summarize Notes"}
         </button>
 
         {error && (
@@ -1365,6 +1462,8 @@ export default function App() {
     useState<{
       text: string;
       name: string;
+      topic?: string;
+      kind: "popular-topic" | "document" | "direct-topic";
     } | null>(null);
 
   const [quiz, setQuiz] =
@@ -1454,11 +1553,43 @@ export default function App() {
     setSource({
       text,
       name,
+      kind: "popular-topic",
     });
 
     setQuiz(null);
     setResult(null);
     setAnswers({});
+  };
+
+  /* Start uploaded document quiz */
+  const startDocumentQuiz = (
+    text: string,
+    name: string
+  ) => {
+    setSource({
+      text,
+      name,
+      kind: "document",
+    });
+
+    setQuiz(null);
+    setResult(null);
+    setAnswers({});
+  };
+
+  /* Start direct AI topic quiz */
+  const startTopicQuiz = (topic: string) => {
+    setSource({
+      text: "",
+      name: topic,
+      topic,
+      kind: "direct-topic",
+    });
+
+    setQuiz(null);
+    setResult(null);
+    setAnswers({});
+    nav("/generate-topic");
   };
 
   /* Quiz generated successfully */
@@ -1501,11 +1632,31 @@ export default function App() {
         )}
       />
 
+      {/* GENERATE FROM TOPIC */}
+      <Route
+        path="/generate-topic"
+        element={guarded(
+          source?.kind === "direct-topic" && source.topic ? (
+            <QuizConfig
+              sourceName={source.name}
+              topic={source.topic}
+              onQuiz={
+                handleQuizGenerated
+              }
+            />
+          ) : (
+            <TopicGenerator
+              onStart={startTopicQuiz}
+            />
+          )
+        )}
+      />
+
       {/* TOPICS */}
       <Route
         path="/topics"
         element={guarded(
-          source ? (
+          source?.kind === "popular-topic" ? (
             <QuizConfig
               sourceText={source.text}
               sourceName={source.name}
@@ -1525,7 +1676,7 @@ export default function App() {
       <Route
         path="/upload"
         element={guarded(
-          source ? (
+          source?.kind === "document" ? (
             <QuizConfig
               sourceText={source.text}
               sourceName={source.name}
@@ -1535,7 +1686,7 @@ export default function App() {
             />
           ) : (
             <UploadPDF
-              onStart={startQuiz}
+              onStart={startDocumentQuiz}
             />
           )
         )}
@@ -1586,7 +1737,7 @@ export default function App() {
             />
           ) : (
             <Navigate
-              to="/topics"
+              to="/dashboard"
               replace
             />
           )

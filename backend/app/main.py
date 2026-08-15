@@ -1,7 +1,10 @@
+
 import hashlib
 import hmac
+import json
 import os
 import sqlite3
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Literal, Optional
@@ -10,27 +13,74 @@ import fitz
 import jwt
 import numpy as np
 import requests
+from docx import Document
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile 
-from fastapi.middleware.cors import CORSMiddleware 
-from pydantic import BaseModel, Field
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Header,
+    HTTPException,
+    UploadFile,
+)
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, field_validator
+
+
+# ============================================================
+# ENVIRONMENT
+# ============================================================
 
 load_dotenv()
 
 ROOT = Path(__file__).resolve().parents[2]
+
 DB_PATH = ROOT / "quizmate.db"
 TOPICS_DIR = ROOT / "data" / "topics"
 
-JWT_SECRET = os.getenv("JWT_SECRET", "demo-secret")
+JWT_SECRET = os.getenv(
+    "JWT_SECRET",
+    "7G5F7aYahj4QHHNK2aALfFcVNGgtNb1M_TnlYIy43Sg",
+)
+
 JWT_ALG = "HS256"
-FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:latest")
-OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text:latest")
 
-app = FastAPI(title="QuizMate AI API", version="1.0.0")
+FRONTEND_ORIGIN = os.getenv(
+    "FRONTEND_ORIGIN",
+    "http://localhost:5173",
+)
 
-origins = [o.strip() for o in FRONTEND_ORIGIN.split(",") if o.strip()]
+OLLAMA_BASE_URL = os.getenv(
+    "OLLAMA_BASE_URL",
+    "http://localhost:11434",
+).rstrip("/")
+
+OLLAMA_MODEL = os.getenv(
+    "OLLAMA_MODEL",
+    "llama3.2:latest",
+)
+
+OLLAMA_EMBED_MODEL = os.getenv(
+    "OLLAMA_EMBED_MODEL",
+    "nomic-embed-text:latest",
+)
+
+
+# ============================================================
+# FASTAPI
+# ============================================================
+
+app = FastAPI(
+    title="QuizMate AI API",
+    version="1.0.0",
+)
+
+origins = [
+    o.strip()
+    for o in FRONTEND_ORIGIN.split(",")
+    if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -39,22 +89,33 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# ============================================================
+# DATABASE
+# ============================================================
+
 def get_db():
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
     return con
 
+
 def init_db():
     con = get_db()
-    con.execute("""
+
+    con.execute(
+        """
         CREATE TABLE IF NOT EXISTS users(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL
         )
-    """)
-    con.execute("""
+        """
+    )
+
+    con.execute(
+        """
         CREATE TABLE IF NOT EXISTS results(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -65,39 +126,109 @@ def init_db():
             created_at TEXT NOT NULL,
             FOREIGN KEY(user_id) REFERENCES users(id)
         )
-    """)
+        """
+    )
+
     con.commit()
     con.close()
 
+
 init_db()
+
+
+# ============================================================
+# PYDANTIC MODELS
+# ============================================================
 
 class AuthIn(BaseModel):
     name: Optional[str] = None
     email: str
     password: str
 
+
 class TokenOut(BaseModel):
     token: str
     user: dict
+
 
 class QuizRequest(BaseModel):
     source_text: Optional[str] = None
     source_name: Optional[str] = None
     topic: Optional[str] = None
-    count: int = Field(default=10, ge=1, le=20)
-    question_type: Literal["MCQ", "True / False", "Short Answer", "Mixed"]
-    difficulty: Literal["Easy", "Medium", "Hard", "Mixed"]
+
+    count: int = Field(
+        default=10,
+        ge=1,
+        le=20,
+    )
+
+    question_type: Literal[
+        "MCQ",
+        "True / False",
+        "Short Answer",
+        "Mixed",
+    ]
+
+    difficulty: Literal[
+        "Easy",
+        "Medium",
+        "Hard",
+        "Mixed",
+    ]
+
 
 class QuizQuestion(BaseModel):
-    type: Literal["MCQ", "True / False", "Short Answer"]
+    type: Literal[
+        "MCQ",
+        "True / False",
+        "Short Answer",
+    ]
+
     question: str
-    options: List[str] = []
-    answer: str = ""
-    explanation: str = ""
-    keywords: List[str] = []
+
+    options: List[str] = Field(
+        default_factory=list
+    )
+
+    answer: str
+
+    explanation: str
+
+    keywords: List[str] = Field(
+        default_factory=list
+    )
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def normalize_type(cls, value):
+        if not isinstance(value, str):
+            return value
+
+        value = value.strip()
+
+        normalized = value.lower().replace(" ", "")
+
+        if normalized in {
+            "true/false",
+            "truefalse",
+        }:
+            return "True / False"
+
+        if normalized == "mcq":
+            return "MCQ"
+
+        if normalized in {
+            "shortanswer",
+            "short-answer",
+        }:
+            return "Short Answer"
+
+        return value
+
 
 class QuizOut(BaseModel):
     questions: List[QuizQuestion]
+
 
 class SubmitRequest(BaseModel):
     source_name: str
@@ -105,52 +236,142 @@ class SubmitRequest(BaseModel):
     questions: List[QuizQuestion]
     answers: dict
 
-class SummaryRequest(BaseModel):
-    text: str = Field(min_length=20)
-    mode: Literal["Quick Summary", "Detailed Summary", "Exam Revision Notes", "Explain Simply"]
 
-def hash_password(password: str, salt: Optional[bytes] = None):
+class SummaryRequest(BaseModel):
+    text: str = Field(
+        min_length=20
+    )
+
+    mode: Literal[
+        "Quick Summary",
+        "Detailed Summary",
+        "Exam Revision Notes",
+        "Explain Simply",
+    ]
+
+
+# ============================================================
+# AUTHENTICATION
+# ============================================================
+
+def hash_password(
+    password: str,
+    salt: Optional[bytes] = None,
+):
     salt = salt or os.urandom(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 120_000)
+
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode(),
+        salt,
+        120_000,
+    )
+
     return salt.hex() + ":" + digest.hex()
 
-def verify_password(password: str, stored: str):
-    salt_hex, digest_hex = stored.split(":")
-    test = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt_hex), 120_000)
-    return hmac.compare_digest(test.hex(), digest_hex)
 
-def make_token(user_id: int, email: str):
+def verify_password(
+    password: str,
+    stored: str,
+):
+    try:
+        salt_hex, digest_hex = stored.split(":")
+
+        test = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode(),
+            bytes.fromhex(salt_hex),
+            120_000,
+        )
+
+        return hmac.compare_digest(
+            test.hex(),
+            digest_hex,
+        )
+
+    except Exception:
+        return False
+
+
+def make_token(
+    user_id: int,
+    email: str,
+):
     payload = {
         "sub": str(user_id),
         "email": email,
-        "exp": datetime.now(timezone.utc) + timedelta(hours=12),
+        "exp": datetime.now(timezone.utc)
+        + timedelta(hours=12),
     }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
-def current_user(authorization: Optional[str] = Header(default=None)):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Please log in.")
-    token = authorization.split(" ", 1)[1]
+    return jwt.encode(
+        payload,
+        JWT_SECRET,
+        algorithm=JWT_ALG,
+    )
+
+
+def current_user(
+    authorization: Optional[str] = Header(
+        default=None
+    ),
+):
+    if (
+        not authorization
+        or not authorization.startswith("Bearer ")
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Please log in.",
+        )
+
+    token = authorization.split(
+        " ",
+        1,
+    )[1]
+
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
-        return {"id": int(payload["sub"]), "email": payload["email"]}
+        payload = jwt.decode(
+            token,
+            JWT_SECRET,
+            algorithms=[JWT_ALG],
+        )
+
+        return {
+            "id": int(payload["sub"]),
+            "email": payload["email"],
+        }
+
     except Exception:
-        raise HTTPException(status_code=401, detail="Session expired. Please log in.")
+        raise HTTPException(
+            status_code=401,
+            detail="Session expired. Please log in.",
+        )
+
+
+# ============================================================
+# TOPICS
+# ============================================================
 
 def load_topics():
-    TOPICS_DIR.mkdir(parents=True, exist_ok=True)
+    TOPICS_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
     return {
-        p.stem.replace("_", " ").title(): p.read_text(encoding="utf-8")
+        p.stem.replace("_", " ").title():
+        p.read_text(encoding="utf-8")
         for p in TOPICS_DIR.glob("*.txt")
     }
+
+
 def get_topic_source(topic: str):
     data = load_topics()
 
-    # Exact match
     if topic in data:
         return topic, data[topic]
 
-    # Case-insensitive match
     topic_lower = topic.strip().lower()
 
     for name, text in data.items():
@@ -159,107 +380,672 @@ def get_topic_source(topic: str):
 
     raise HTTPException(
         status_code=404,
-        detail=f"Topic '{topic}' was not found."
+        detail=f"Topic '{topic}' was not found.",
     )
 
 
-# ---------------------------------------------------------------------------
-# LOCAL OLLAMA + RAG
-# ---------------------------------------------------------------------------
+# ============================================================
+# OLLAMA
+# ============================================================
 
-# Simple in-memory cache for the current backend process.
-# This avoids recomputing embeddings when the same PDF is used repeatedly.
 RAG_CACHE = {}
 
 
-def ollama_post(endpoint: str, payload: dict, timeout: int = 180):
-    """Call the local Ollama HTTP API."""
+def ollama_post(
+    endpoint: str,
+    payload: dict,
+    timeout: int = 180,
+):
     url = f"{OLLAMA_BASE_URL}{endpoint}"
+
     try:
-        response = requests.post(url, json=payload, timeout=timeout)
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=timeout,
+        )
+
         response.raise_for_status()
+
         return response.json()
+
     except requests.exceptions.ConnectionError:
         raise HTTPException(
             status_code=503,
             detail=(
-                "Ollama is not running. Start Ollama with 'ollama serve' "
-                "and make sure the required models are installed."
+                "Ollama is not running. "
+                "Start Ollama and make sure the required "
+                "models are installed."
             ),
         )
+
     except requests.exceptions.Timeout:
         raise HTTPException(
             status_code=504,
-            detail="Ollama took too long to respond. Please try again.",
+            detail=(
+                "Ollama took too long to respond. "
+                "Please try again."
+            ),
         )
+
     except requests.exceptions.HTTPError as e:
         detail = ""
+
         try:
-            detail = response.json().get("error", "")
+            detail = response.json().get(
+                "error",
+                "",
+            )
         except Exception:
             pass
+
         raise HTTPException(
             status_code=502,
-            detail=f"Ollama API error: {detail or str(e)}",
+            detail=(
+                f"Ollama API error: "
+                f"{detail or str(e)}"
+            ),
+        )
+
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Ollama request failed: {str(e)}",
         )
 
 
 def call_ai(prompt: str):
-    """Generate text locally with Llama 3.2 through Ollama."""
-    print("\n========== OLLAMA DEBUG ==========")
-    print("OLLAMA URL:", OLLAMA_BASE_URL)
-    print("LLM MODEL:", OLLAMA_MODEL)
-    print("EMBED MODEL:", OLLAMA_EMBED_MODEL)
-    print("PROMPT LENGTH:", len(prompt))
+    print(
+        "\n========== OLLAMA DEBUG =========="
+    )
+
+    print(
+        "OLLAMA URL:",
+        OLLAMA_BASE_URL,
+    )
+
+    print(
+        "LLM MODEL:",
+        OLLAMA_MODEL,
+    )
+
+    print(
+        "EMBED MODEL:",
+        OLLAMA_EMBED_MODEL,
+    )
+
+    print(
+        "PROMPT LENGTH:",
+        len(prompt),
+    )
 
     payload = {
         "model": OLLAMA_MODEL,
+
         "messages": [
             {
                 "role": "system",
                 "content": (
-                    "You are QuizMate AI. Follow the user's instructions exactly. "
-                    "Use only the supplied retrieved study context when generating "
-                    "educational content."
+                    "You are QuizMate AI. "
+                    "Follow the user's instructions exactly. "
+                    "Return valid JSON when requested. "
+                    "Do not return markdown."
                 ),
             },
-            {"role": "user", "content": prompt},
+            {
+                "role": "user",
+                "content": prompt,
+            },
         ],
+
         "stream": False,
+
         "format": "json",
+
         "options": {
             "temperature": 0.2,
         },
     }
 
-    data = ollama_post("/api/chat", payload, timeout=300)
-    result = data.get("message", {}).get("content", "")
+    data = ollama_post(
+        "/api/chat",
+        payload,
+        timeout=300,
+    )
 
-    print("OLLAMA SUCCESS:", bool(result))
-    print("RESPONSE LENGTH:", len(result))
-    print("RESPONSE PREVIEW:", result[:500])
-    print("==================================\n")
+    result = (
+        data
+        .get("message", {})
+        .get("content", "")
+    )
+
+    print(
+        "OLLAMA SUCCESS:",
+        bool(result),
+    )
+
+    print(
+        "RESPONSE LENGTH:",
+        len(result),
+    )
+
+    print(
+        "RESPONSE PREVIEW:",
+        result[:1000],
+    )
+
+    print(
+        "==================================\n"
+    )
+
+    if not result.strip():
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Ollama returned an empty response."
+            ),
+        )
+
     return result
 
 
-def chunk_text(text: str, chunk_size: int = 1200, overlap: int = 200):
-    """
-    Split document text into overlapping chunks.
+# ============================================================
+# JSON HELPERS
+# ============================================================
 
-    Character-based chunking is deliberately simple and dependency-light for
-    the hackathon. Each chunk keeps enough surrounding context for retrieval.
+def clean_json(raw: str):
+    if not raw:
+        return ""
+
+    raw = raw.strip()
+
+    if raw.startswith("```json"):
+        raw = raw[len("```json"):]
+
+    elif raw.startswith("```"):
+        raw = raw[len("```"):]
+
+    if raw.endswith("```"):
+        raw = raw[:-3]
+
+    return raw.strip()
+
+
+def parse_ai_json(raw: str):
+    cleaned = clean_json(raw)
+
+    if not cleaned:
+        raise ValueError(
+            "AI returned an empty response."
+        )
+
+    try:
+        return json.loads(cleaned)
+
+    except json.JSONDecodeError as e:
+        print(
+            "JSON PARSE ERROR:",
+            repr(e),
+        )
+
+        print(
+            "RAW AI RESPONSE:",
+            cleaned[:5000],
+        )
+
+        raise ValueError(
+            "AI returned invalid JSON."
+        )
+
+
+# ============================================================
+# QUESTION NORMALIZATION
+# ============================================================
+
+def normalize_question_item(
+    item: dict,
+):
     """
-    cleaned = " ".join(text.split())
+    Normalize common Ollama mistakes before Pydantic validation.
+    """
+
+    if not isinstance(item, dict):
+        raise ValueError(
+            "Question is not a JSON object."
+        )
+
+    item = dict(item)
+
+    # -------------------------
+    # Normalize type
+    # -------------------------
+
+    raw_type = item.get(
+        "type",
+        "",
+    )
+
+    if isinstance(raw_type, str):
+        normalized_type = (
+            raw_type
+            .strip()
+            .lower()
+            .replace(" ", "")
+        )
+
+        if normalized_type in {
+            "true/false",
+            "truefalse",
+        }:
+            item["type"] = "True / False"
+
+        elif normalized_type == "mcq":
+            item["type"] = "MCQ"
+
+        elif normalized_type in {
+            "shortanswer",
+            "short-answer",
+        }:
+            item["type"] = "Short Answer"
+
+    # -------------------------
+    # Options
+    # -------------------------
+
+    options = item.get(
+        "options",
+        None,
+    )
+
+    if not isinstance(options, list):
+        options = []
+
+    item["options"] = [
+        str(option).strip()
+        for option in options
+    ]
+
+    # True/False always gets options
+    if item.get("type") == "True / False":
+        item["options"] = [
+            "True",
+            "False",
+        ]
+
+    # Short Answer always gets empty options
+    if item.get("type") == "Short Answer":
+        item["options"] = []
+
+    # -------------------------
+    # Keywords
+    # -------------------------
+
+    keywords = item.get(
+        "keywords",
+        [],
+    )
+
+    if not isinstance(keywords, list):
+        keywords = []
+
+    item["keywords"] = [
+        str(k).strip()
+        for k in keywords
+        if str(k).strip()
+    ]
+
+    # -------------------------
+    # Required strings
+    # -------------------------
+
+    item["question"] = str(
+        item.get(
+            "question",
+            "",
+        )
+    ).strip()
+
+    item["answer"] = str(
+        item.get(
+            "answer",
+            "",
+        )
+    ).strip()
+
+    item["explanation"] = str(
+        item.get(
+            "explanation",
+            "",
+        )
+    ).strip()
+
+    return item
+
+
+# ============================================================
+# QUESTION VALIDATION
+# ============================================================
+
+def validate_questions(
+    items,
+    requested_count: int,
+    selected_type: str,
+):
+    if not isinstance(items, list):
+        raise ValueError(
+            "AI did not return a questions list."
+        )
+
+    validated = []
+    seen = set()
+
+    for raw_item in items:
+
+        try:
+            normalized = normalize_question_item(
+                raw_item
+            )
+
+            # =================================================
+            # MIXED MODE
+            # =================================================
+
+            if selected_type == "Mixed":
+
+                if normalized.get("type") not in {
+                    "MCQ",
+                    "True / False",
+                    "Short Answer",
+                }:
+                    print(
+                        "Skipping unsupported "
+                        "question type:",
+                        normalized.get("type"),
+                    )
+                    continue
+
+            # =================================================
+            # STRICT SINGLE TYPE MODE
+            # =================================================
+
+            else:
+
+                if normalized.get("type") != selected_type:
+                    print(
+                        "QUESTION TYPE SKIPPED:",
+                        normalized.get("type"),
+                        "| EXPECTED:",
+                        selected_type,
+                    )
+                    continue
+
+            question = QuizQuestion(
+                **normalized
+            )
+
+        except Exception as e:
+            print(
+                "QUESTION VALIDATION SKIPPED:",
+                repr(e),
+            )
+            continue
+
+        question_key = " ".join(
+            question.question
+            .lower()
+            .split()
+        )
+
+        if not question_key:
+            continue
+
+        if question_key in seen:
+            print(
+                "Skipping duplicate question."
+            )
+            continue
+
+        # ====================================================
+        # MCQ
+        # ====================================================
+
+        if question.type == "MCQ":
+
+            if len(question.options) != 4:
+                print(
+                    "Skipping MCQ: "
+                    "must have exactly 4 options."
+                )
+                continue
+
+            normalized_options = [
+                option.strip().lower()
+                for option in question.options
+            ]
+
+            if len(
+                set(normalized_options)
+            ) != 4:
+                print(
+                    "Skipping MCQ: "
+                    "duplicate options."
+                )
+                continue
+
+            if not question.answer.strip():
+                print(
+                    "Skipping MCQ: "
+                    "answer is empty."
+                )
+                continue
+
+            if (
+                question.answer
+                .strip()
+                .lower()
+                not in normalized_options
+            ):
+                print(
+                    "Skipping MCQ: "
+                    "answer is not one of options."
+                )
+                continue
+
+        # ====================================================
+        # TRUE / FALSE
+        # ====================================================
+
+        elif question.type == "True / False":
+
+            if (
+                question.answer
+                .strip()
+                .lower()
+                not in {
+                    "true",
+                    "false",
+                }
+            ):
+                print(
+                    "Skipping True/False: "
+                    "answer must be True or False."
+                )
+                continue
+
+            question.options = [
+                "True",
+                "False",
+            ]
+
+        # ====================================================
+        # SHORT ANSWER
+        # ====================================================
+
+        elif question.type == "Short Answer":
+
+            if not question.answer.strip():
+                print(
+                    "Skipping Short Answer: "
+                    "answer is empty."
+                )
+                continue
+
+            question.options = []
+
+        # ====================================================
+        # UNKNOWN TYPE
+        # ====================================================
+
+        else:
+
+            print(
+                "Skipping unsupported question type:",
+                question.type,
+            )
+
+            continue
+
+        seen.add(question_key)
+
+        validated.append(question)
+
+        if len(validated) >= requested_count:
+            break
+
+    return validated
+
+
+# ============================================================
+# ROBUST AI QUESTION GENERATION
+# ============================================================
+
+def generate_validated_questions(
+    prompt: str,
+    requested_count: int,
+    selected_type: str,
+    mode: str,
+    max_attempts: int = 3,
+):
+    """
+    Ask Ollama for a quiz and retry when the model returns
+    malformed, incomplete, duplicate, or wrong-type questions.
+
+    This keeps the existing validation rules but avoids failing
+    immediately when Llama produces only a few valid questions.
+    """
+    last_valid_count = 0
+    last_error = ""
+
+    for attempt in range(1, max_attempts + 1):
+        retry_instruction = ""
+
+        if attempt > 1:
+            retry_instruction = f"""
+
+IMPORTANT RETRY:
+This is retry {attempt} of {max_attempts}.
+The previous response did not contain enough valid questions.
+Generate a COMPLETE replacement set of exactly {requested_count}
+questions.
+
+Do not copy invalid questions from the previous attempt.
+Be extremely strict about the requested question type.
+For MCQ, use exactly 4 unique options and make the answer exactly
+match one option.
+For True / False, use only True or False and options exactly
+["True", "False"].
+For Short Answer, use an empty options array and a non-empty answer.
+Return ONLY the JSON object.
+"""
+
+        try:
+            raw = call_ai(prompt + retry_instruction)
+            parsed = parse_ai_json(raw)
+
+            items = (
+                parsed.get("questions", [])
+                if isinstance(parsed, dict)
+                else parsed
+            )
+
+            validated = validate_questions(
+                items,
+                requested_count,
+                selected_type,
+            )
+
+            last_valid_count = len(validated)
+
+            if len(validated) >= requested_count:
+                print(
+                    f"{mode} QUIZ SUCCESS: "
+                    f"{len(validated)} valid questions "
+                    f"on attempt {attempt}."
+                )
+                return validated[:requested_count]
+
+            last_error = (
+                f"Llama returned {len(validated)} valid "
+                f"questions out of {requested_count}."
+            )
+
+            print(
+                f"{mode} QUIZ RETRY {attempt}: "
+                f"{last_error}"
+            )
+
+        except HTTPException:
+            raise
+
+        except Exception as exc:
+            last_error = str(exc)
+            print(
+                f"{mode} QUIZ RETRY {attempt}: "
+                f"AI response could not be parsed: {exc!r}"
+            )
+
+    raise HTTPException(
+        status_code=502,
+        detail=(
+            f"Llama generated only {last_valid_count} valid "
+            f"{selected_type} questions out of {requested_count} "
+            f"after {max_attempts} attempts. "
+            "Please try again."
+        ),
+    )
+
+
+# ============================================================
+# RAG CHUNKING
+# ============================================================
+
+def chunk_text(
+    text: str,
+    chunk_size: int = 1200,
+    overlap: int = 200,
+):
+    cleaned = " ".join(
+        text.split()
+    )
+
     if not cleaned:
         return []
 
     chunks = []
+
     start = 0
     length = len(cleaned)
 
     while start < length:
-        end = min(start + chunk_size, length)
-        chunk = cleaned[start:end].strip()
+
+        end = min(
+            start + chunk_size,
+            length,
+        )
+
+        chunk = cleaned[
+            start:end
+        ].strip()
 
         if chunk:
             chunks.append(chunk)
@@ -267,17 +1053,24 @@ def chunk_text(text: str, chunk_size: int = 1200, overlap: int = 200):
         if end >= length:
             break
 
-        start = max(end - overlap, start + 1)
+        start = max(
+            end - overlap,
+            start + 1,
+        )
 
     return chunks
 
 
-def embed_texts(texts: List[str]) -> List[List[float]]:
-    """Create local embeddings with nomic-embed-text through Ollama."""
+# ============================================================
+# EMBEDDINGS
+# ============================================================
+
+def embed_texts(
+    texts: List[str],
+):
     if not texts:
         return []
 
-    # Ollama supports a list of inputs on /api/embed.
     data = ollama_post(
         "/api/embed",
         {
@@ -288,96 +1081,164 @@ def embed_texts(texts: List[str]) -> List[List[float]]:
         timeout=300,
     )
 
-    embeddings = data.get("embeddings")
-    if not embeddings or len(embeddings) != len(texts):
+    embeddings = data.get(
+        "embeddings"
+    )
+
+    if (
+        not embeddings
+        or len(embeddings) != len(texts)
+    ):
         raise HTTPException(
             status_code=502,
-            detail="Ollama did not return valid embeddings. Check nomic-embed-text.",
+            detail=(
+                "Ollama did not return valid embeddings. "
+                "Check nomic-embed-text."
+            ),
         )
 
     return embeddings
 
 
-def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    """Cosine similarity between two embedding vectors."""
-    denom = np.linalg.norm(a) * np.linalg.norm(b)
+def cosine_similarity(
+    a: np.ndarray,
+    b: np.ndarray,
+):
+    denom = (
+        np.linalg.norm(a)
+        * np.linalg.norm(b)
+    )
+
     if denom == 0:
         return 0.0
-    return float(np.dot(a, b) / denom)
+
+    return float(
+        np.dot(a, b) / denom
+    )
 
 
-def build_rag_index(source_text: str, source_name: str):
-    """
-    Chunk and embed a document.
-
-    The index is cached by content hash so repeated quiz attempts on the same
-    PDF do not recompute all embeddings during the current server session.
-    """
-    content_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+def build_rag_index(
+    source_text: str,
+    source_name: str,
+):
+    content_hash = hashlib.sha256(
+        source_text.encode("utf-8")
+    ).hexdigest()
 
     if content_hash in RAG_CACHE:
-        return RAG_CACHE[content_hash]
+        return RAG_CACHE[
+            content_hash
+        ]
 
-    chunks = chunk_text(source_text)
+    chunks = chunk_text(
+        source_text
+    )
 
     if not chunks:
         raise HTTPException(
             status_code=400,
-            detail="No usable text was found in the document.",
+            detail=(
+                "No usable text was found "
+                "in the document."
+            ),
         )
 
-    print(f"RAG: creating {len(chunks)} chunks for {source_name}")
-    embeddings = embed_texts(chunks)
+    print(
+        f"RAG: creating {len(chunks)} "
+        f"chunks for {source_name}"
+    )
+
+    embeddings = embed_texts(
+        chunks
+    )
 
     index = {
         "source_name": source_name,
         "chunks": chunks,
-        "embeddings": np.asarray(embeddings, dtype=np.float32),
+        "embeddings": np.asarray(
+            embeddings,
+            dtype=np.float32,
+        ),
     }
 
-    RAG_CACHE[content_hash] = index
+    RAG_CACHE[
+        content_hash
+    ] = index
 
-    # Prevent unlimited memory growth during a long demo.
     if len(RAG_CACHE) > 5:
-        oldest_key = next(iter(RAG_CACHE))
+
+        oldest_key = next(
+            iter(RAG_CACHE)
+        )
+
         if oldest_key != content_hash:
-            del RAG_CACHE[oldest_key]
+            del RAG_CACHE[
+                oldest_key
+            ]
 
     return index
 
 
-def retrieve_context(index, queries: List[str], top_k: int = 10):
-    """
-    Retrieve the most relevant document chunks for the quiz-generation task.
-
-    We use multiple retrieval queries so the quiz can cover definitions,
-    concepts, processes, examples, and relationships instead of focusing on
-    one small part of the document.
-    """
+def retrieve_context(
+    index,
+    queries: List[str],
+    top_k: int = 10,
+):
     chunks = index["chunks"]
+
     matrix = index["embeddings"]
 
-    query_embeddings = embed_texts(queries)
+    query_embeddings = embed_texts(
+        queries
+    )
 
-    scores = np.zeros(len(chunks), dtype=np.float32)
+    scores = np.zeros(
+        len(chunks),
+        dtype=np.float32,
+    )
 
     for query_vector in query_embeddings:
-        q = np.asarray(query_vector, dtype=np.float32)
-        query_scores = np.array(
-            [cosine_similarity(q, row) for row in matrix],
+
+        q = np.asarray(
+            query_vector,
             dtype=np.float32,
         )
-        scores = np.maximum(scores, query_scores)
 
-    top_k = min(top_k, len(chunks))
-    ranked_indices = np.argsort(scores)[::-1][:top_k]
+        query_scores = np.array(
+            [
+                cosine_similarity(
+                    q,
+                    row,
+                )
+                for row in matrix
+            ],
+            dtype=np.float32,
+        )
+
+        scores = np.maximum(
+            scores,
+            query_scores,
+        )
+
+    top_k = min(
+        top_k,
+        len(chunks),
+    )
+
+    ranked_indices = np.argsort(
+        scores
+    )[::-1][:top_k]
 
     retrieved = []
+
     for idx in ranked_indices:
+
         retrieved.append(
             {
                 "chunk_id": int(idx),
-                "score": float(scores[idx]),
+                "score": float(
+                    scores[idx]
+                ),
                 "text": chunks[idx],
             }
         )
@@ -385,415 +1246,1503 @@ def retrieve_context(index, queries: List[str], top_k: int = 10):
     return retrieved
 
 
-def build_retrieval_queries(req: QuizRequest):
-    """Create semantic retrieval queries from the user's quiz settings."""
+def build_retrieval_queries(
+    req: QuizRequest,
+):
     type_query = {
-        "MCQ": "important concepts, definitions, comparisons, examples and distinctions",
-        "True / False": "facts, definitions, properties, relationships and statements that can be judged true or false",
-        "Short Answer": "important definitions, explanations, processes and key concepts",
-        "Mixed": "important definitions, concepts, examples, processes, comparisons and relationships",
-    }[req.question_type]
+        "MCQ":
+            "important concepts, definitions, comparisons, examples and distinctions",
+
+        "True / False":
+            "facts, definitions, properties, relationships and statements that can be judged true or false",
+
+        "Short Answer":
+            "important definitions, explanations, processes and key concepts",
+
+        "Mixed":
+            "important definitions, concepts, examples, processes, comparisons and relationships",
+    }[
+        req.question_type
+    ]
 
     difficulty_query = {
-        "Easy": "basic concepts and direct explanations",
-        "Medium": "conceptual understanding, comparisons and applications",
-        "Hard": "deeper relationships, reasoning, edge cases and detailed explanations",
-        "Mixed": "a mixture of basic, conceptual and deeper material",
-    }[req.difficulty]
+        "Easy":
+            "basic concepts and direct explanations",
+
+        "Medium":
+            "conceptual understanding, comparisons and applications",
+
+        "Hard":
+            "deeper relationships, reasoning, edge cases and detailed explanations",
+
+        "Mixed":
+            "a mixture of basic, conceptual and deeper material",
+    }[
+        req.difficulty
+    ]
 
     return [
         f"Study material about {type_query}.",
+
         f"Study material suitable for {difficulty_query} quiz questions.",
-        f"Most important examinable concepts and definitions in this study material.",
-        f"Processes, examples, relationships, comparisons, formulas, and key facts in this study material.",
+
+        "Most important examinable concepts and definitions.",
+
+        "Processes, examples, relationships, comparisons, formulas, and key facts.",
     ]
 
 
-def format_retrieved_context(retrieved):
-    """Format retrieved chunks for the LLM while keeping source boundaries clear."""
+def format_retrieved_context(
+    retrieved,
+):
     parts = []
 
     for item in retrieved:
+
         parts.append(
-            f"[SOURCE CHUNK {item['chunk_id']} | relevance={item['score']:.3f}]\n"
+            f"[SOURCE CHUNK {item['chunk_id']} "
+            f"| relevance={item['score']:.3f}]\n"
             f"{item['text']}"
         )
 
     return "\n\n".join(parts)
 
-def clean_json(raw: str):
-    raw = raw.strip()
-    raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    return raw
 
-def generate_questions(req: QuizRequest):
+# ============================================================
+# QUIZ GENERATION HELPERS
+# ============================================================
 
-    # ---------------------------------------------------------
-    # Determine the source: uploaded document OR predefined topic
-    # ---------------------------------------------------------
+def question_type_instruction(
+    question_type: str,
+):
+    return {
+        "MCQ":
+            "Generate ONLY Multiple Choice Questions.",
 
-    if req.topic:
-        source_name, source_text = get_topic_source(req.topic)
+        "True / False":
+            "Generate ONLY True / False questions.",
 
-    elif req.source_text:
-        source_text = req.source_text.strip()
-        source_name = req.source_name or "Uploaded Document"
+        "Short Answer":
+            "Generate ONLY Short Answer questions.",
+
+        "Mixed":
+            (
+                "Generate a balanced mixture of "
+                "MCQ, True / False, and Short Answer questions."
+            ),
+    }[question_type]
+
+
+def difficulty_instruction(
+    difficulty: str,
+):
+    return {
+        "Easy":
+            "Test basic concepts, definitions and direct understanding.",
+
+        "Medium":
+            "Test conceptual understanding, comparisons, applications and important ideas.",
+
+        "Hard":
+            "Test deeper reasoning, relationships, applications, edge cases and detailed understanding.",
+
+        "Mixed":
+            "Use a mixture of easy, medium and hard questions.",
+    }[difficulty]
+
+
+def build_topic_prompt(
+    req: QuizRequest,
+    topic: str,
+):
+    if req.question_type == "MCQ":
+
+        type_rules = """
+Every question MUST be an MCQ.
+
+The "type" MUST be exactly:
+"MCQ"
+
+The "options" field MUST contain exactly 4 unique options.
+
+The "answer" MUST exactly match one of the options.
+
+DO NOT generate True / False questions.
+
+DO NOT generate Short Answer questions.
+"""
+
+    elif req.question_type == "True / False":
+
+        type_rules = """
+Every question MUST be a True / False question.
+
+The "type" MUST be exactly:
+"True / False"
+
+The "options" field MUST be exactly:
+["True", "False"]
+
+The "answer" MUST be exactly:
+"True"
+or
+"False"
+
+DO NOT generate MCQ questions.
+
+DO NOT generate Short Answer questions.
+"""
+
+    elif req.question_type == "Short Answer":
+
+        type_rules = """
+Every question MUST be a Short Answer question.
+
+The "type" MUST be exactly:
+"Short Answer"
+
+The "options" field MUST be exactly:
+[]
+
+The "answer" MUST contain a concise,
+correct and NON-EMPTY answer.
+
+DO NOT generate MCQ questions.
+
+DO NOT generate True / False questions.
+"""
 
     else:
+
+        type_rules = """
+Generate a balanced mixture of:
+
+- MCQ
+- True / False
+- Short Answer
+
+MCQ:
+- Exactly 4 unique options.
+- Answer must match an option.
+
+True / False:
+- Options must be ["True", "False"].
+- Answer must be exactly "True" or "False".
+
+Short Answer:
+- Options must be [].
+- Answer must be non-empty.
+"""
+
+    return f"""
+You are QuizMate AI.
+
+Create EXACTLY {req.count} NEW educational quiz questions.
+
+TOPIC:
+{topic}
+
+QUESTION TYPE:
+{question_type_instruction(req.question_type)}
+
+DIFFICULTY:
+{difficulty_instruction(req.difficulty)}
+
+============================================================
+CRITICAL QUESTION TYPE RULE
+============================================================
+
+The selected question type is:
+
+"{req.question_type}"
+
+{type_rules}
+
+============================================================
+GENERAL RULES
+============================================================
+
+1. Questions must be specifically about the requested topic.
+
+2. Do not repeat questions.
+
+3. Make every question meaningfully different.
+
+4. Generate EXACTLY {req.count} questions.
+
+5. Every question MUST contain:
+
+   type
+   question
+   options
+   answer
+   explanation
+   keywords
+
+6. Never omit any field.
+
+7. Every answer MUST be non-empty.
+
+8. Generate educationally accurate questions.
+
+9. Do not use markdown.
+
+10. Do not return ```json.
+
+11. Return ONLY valid JSON.
+
+12. Generate new questions every time.
+
+============================================================
+FINAL VALIDATION BEFORE RESPONSE
+============================================================
+
+Before returning the JSON, verify:
+
+- Exactly {req.count} questions exist.
+- Every question uses the selected type.
+- No question uses a different type.
+- Every answer is non-empty.
+- All required fields exist.
+
+============================================================
+OUTPUT FORMAT
+============================================================
+
+Return:
+
+{{
+  "questions": [
+    {{
+      "type": "{req.question_type}",
+      "question": "Question text",
+      "options": [],
+      "answer": "Correct answer",
+      "explanation": "Brief explanation.",
+      "keywords": []
+    }}
+  ]
+}}
+"""
+
+
+# ============================================================
+# QUIZ GENERATION
+# ============================================================
+
+def generate_questions(
+    req: QuizRequest,
+):
+
+    # ========================================================
+    # TOPIC-ONLY MODE
+    #
+    # IMPORTANT:
+    # Direct topic mode does NOT search data/topics/*.txt.
+    #
+    # Example:
+    # topic = "iot"
+    #
+    # It directly sends "iot" to Ollama.
+    # ========================================================
+
+    if req.topic and not req.source_text:
+
+        topic = req.topic.strip()
+
+        if len(topic) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail="Please enter a valid topic.",
+            )
+
+        prompt = build_topic_prompt(
+            req,
+            topic,
+        )
+
+        return generate_validated_questions(
+            prompt=prompt,
+            requested_count=req.count,
+            selected_type=req.question_type,
+            mode="TOPIC",
+            max_attempts=3,
+        )
+
+    # ========================================================
+    # DOCUMENT / RAG MODE
+    # ========================================================
+
+    if req.source_text:
+
+        source_text = (
+            req.source_text.strip()
+        )
+
+        source_name = (
+            req.source_name
+            or "Uploaded Document"
+        )
+
+    elif req.topic:
+
+        # This is kept for EXISTING topic-file functionality.
+        # Direct topic mode above returns before reaching here.
+        source_name, source_text = (
+            get_topic_source(
+                req.topic
+            )
+        )
+
+    else:
+
         raise HTTPException(
             status_code=400,
-            detail="Please upload a document or select/enter a topic."
+            detail=(
+                "Please upload a document "
+                "or select a topic."
+            ),
         )
 
     if len(source_text) < 100:
+
         raise HTTPException(
             status_code=400,
-            detail="The selected topic/document does not contain enough study material."
+            detail=(
+                "The selected document/topic "
+                "does not contain enough study material."
+            ),
         )
 
-    # ---------------------------------------------------------
-    # Existing RAG pipeline continues from here
-    # ---------------------------------------------------------
+    index = build_rag_index(
+        source_text,
+        source_name,
+    )
 
-    index = build_rag_index(source_text, source_name)
-
-    retrieval_queries = build_retrieval_queries(req)
+    retrieval_queries = (
+        build_retrieval_queries(req)
+    )
 
     top_k = min(
-        max(8, req.count // 2 + 5),
+        max(
+            8,
+            req.count // 2 + 5,
+        ),
         15,
-        len(index["chunks"])
+        len(index["chunks"]),
     )
 
     retrieved = retrieve_context(
         index,
         retrieval_queries,
-        top_k=top_k
+        top_k=top_k,
     )
 
-    # Build/reuse local vector index.
-    index = build_rag_index(source_text, req.source_name)
-
-    # Retrieve only the most relevant parts of the uploaded document.
-    retrieval_queries = build_retrieval_queries(req)
-
-    # A little extra context helps the model produce the requested count.
-    top_k = min(max(8, req.count // 2 + 5), 15, len(index["chunks"]))
-    retrieved = retrieve_context(index, retrieval_queries, top_k=top_k)
-
     if not retrieved:
+
         raise HTTPException(
             status_code=502,
-            detail="RAG could not retrieve relevant content from the document.",
+            detail=(
+                "RAG could not retrieve "
+                "relevant content."
+            ),
         )
 
-    context = format_retrieved_context(retrieved)
+    context = format_retrieved_context(
+        retrieved
+    )
 
-    question_type_instruction = {
-        "MCQ": "Generate only Multiple Choice Questions.",
-        "True / False": "Generate only True / False questions.",
-        "Short Answer": "Generate only Short Answer questions.",
-        "Mixed": "Generate a balanced mixture of MCQ, True / False, and Short Answer questions.",
-    }[req.question_type]
+    # ========================================================
+    # DOCUMENT TYPE RULES
+    # ========================================================
 
-    difficulty_instruction = {
-        "Easy": "Test basic understanding and definitions.",
-        "Medium": "Test understanding, comparison, application, and concepts.",
-        "Hard": "Require deeper reasoning and careful understanding of the retrieved material.",
-        "Mixed": "Use a mixture of easy, medium, and hard questions.",
-    }[req.difficulty]
+    if req.question_type == "MCQ":
+
+        document_type_rules = """
+Generate ONLY MCQ questions.
+
+Every "type" MUST be exactly "MCQ".
+
+Each question MUST contain exactly 4 unique options.
+
+The answer MUST exactly match one option.
+
+Do NOT generate True / False.
+
+Do NOT generate Short Answer.
+"""
+
+    elif req.question_type == "True / False":
+
+        document_type_rules = """
+Generate ONLY True / False questions.
+
+Every "type" MUST be exactly "True / False".
+
+Every question MUST have:
+
+"options": ["True", "False"]
+
+The answer MUST be exactly "True" or "False".
+
+Do NOT generate MCQ.
+
+Do NOT generate Short Answer.
+"""
+
+    elif req.question_type == "Short Answer":
+
+        document_type_rules = """
+Generate ONLY Short Answer questions.
+
+Every "type" MUST be exactly "Short Answer".
+
+Every question MUST have:
+
+"options": []
+
+Every answer MUST contain a concise,
+correct and non-empty answer.
+
+Do NOT generate MCQ.
+
+Do NOT generate True / False.
+"""
+
+    else:
+
+        document_type_rules = """
+Generate a balanced mixture of:
+
+- MCQ
+- True / False
+- Short Answer
+
+MCQ:
+- Exactly 4 unique options.
+- Answer must match one option.
+
+True / False:
+- Options must be ["True", "False"].
+- Answer must be exactly "True" or "False".
+
+Short Answer:
+- Options must be [].
+- Answer must be non-empty.
+"""
 
     prompt = f"""
-You are QuizMate AI, an educational quiz generator using Retrieval-Augmented
-Generation (RAG).
+You are QuizMate AI.
 
-Create EXACTLY {req.count} NEW quiz questions.
+Generate EXACTLY {req.count} NEW quiz questions.
 
-The study material was chunked and searched using the local embedding model
-nomic-embed-text:latest. The text below contains the retrieved evidence from
-the user's selected study source.
-
-STRICT GROUNDING RULES:
-1. Use ONLY information explicitly supported by the RETRIEVED STUDY CONTEXT.
-2. Do NOT use your general knowledge to fill gaps.
-3. Do NOT invent facts, examples, definitions, dates, formulas, or relationships.
-4. Do NOT create generic questions unrelated to the retrieved context.
-5. Every answer and explanation must be supported by the retrieved context.
-6. Create NEW questions; do not use hard-coded/demo questions.
-7. Make questions meaningfully different from one another.
-8. If the retrieved context does not support a requested question, do not invent one.
+Use ONLY the retrieved study context.
 
 QUESTION TYPE:
-{question_type_instruction}
+{question_type_instruction(req.question_type)}
 
 DIFFICULTY:
-{difficulty_instruction}
+{difficulty_instruction(req.difficulty)}
 
-OUTPUT:
-Return ONLY a valid JSON object with this exact structure:
+============================================================
+STRICT QUESTION TYPE RULES
+============================================================
+
+{document_type_rules}
+
+============================================================
+DOCUMENT RULES
+============================================================
+
+1. Use ONLY information explicitly supported by the context.
+
+2. Do NOT use outside knowledge.
+
+3. Do NOT invent facts.
+
+4. Do NOT repeat questions.
+
+5. Make every question meaningfully different.
+
+6. Every answer must be supported by the context.
+
+7. Every question MUST contain:
+
+   type
+   question
+   options
+   answer
+   explanation
+   keywords
+
+8. Never omit any field.
+
+9. Every answer MUST be non-empty.
+
+10. Return ONLY valid JSON.
+
+11. Do not return markdown.
+
+12. Do not return ```json.
+
+============================================================
+FINAL VALIDATION
+============================================================
+
+Before returning the JSON, verify:
+
+- Exactly {req.count} questions exist.
+- Every question uses the selected type.
+- No question has a different type.
+- Every answer is non-empty.
+- All required fields exist.
+
+============================================================
+OUTPUT
+============================================================
+
+Return:
+
 {{
   "questions": [
-    ...
+    {{
+      "type": "{req.question_type}",
+      "question": "Question",
+      "options": [],
+      "answer": "Correct answer",
+      "explanation": "Explanation from context.",
+      "keywords": []
+    }}
   ]
 }}
 
-MCQ object:
-{{
-  "type": "MCQ",
-  "question": "Question text",
-  "options": ["Option A", "Option B", "Option C", "Option D"],
-  "answer": "Exactly one option",
-  "explanation": "Brief explanation based only on retrieved study context",
-  "keywords": []
-}}
+============================================================
+RETRIEVED STUDY CONTEXT
+============================================================
 
-True / False object:
-{{
-  "type": "True / False",
-  "question": "Statement based only on retrieved study context",
-  "options": [],
-  "answer": "True",
-  "explanation": "Brief explanation based only on retrieved study context",
-  "keywords": []
-}}
-
-Short Answer object:
-{{
-  "type": "Short Answer",
-  "question": "Question based only on retrieved study context",
-  "options": [],
-  "answer": "Expected answer supported by retrieved study context",
-  "explanation": "Brief explanation based only on retrieved study context",
-  "keywords": ["important", "answer"]
-}}
-
-QUALITY RULES:
-- MCQ must have exactly four unique options.
-- The answer must exactly match one option.
-- True/False answer must be exactly True or False.
-- Do not reveal the answer inside the question.
-- Do not duplicate questions.
-- Keep explanations concise.
-- Do not output markdown.
-
-RETRIEVED STUDY CONTEXT:
 <RETRIEVED_CONTEXT>
 {context}
 </RETRIEVED_CONTEXT>
 """
 
-    raw = call_ai(prompt)
+    return generate_validated_questions(
+        prompt=prompt,
+        requested_count=req.count,
+        selected_type=req.question_type,
+        mode="DOCUMENT",
+        max_attempts=3,
+    )
 
-    if not raw:
-        raise HTTPException(
-            status_code=503,
-            detail="Local Llama generation failed. Check that Ollama is running and llama3.2:latest is installed.",
+
+# ============================================================
+# QUIZ SCORING
+# ============================================================
+
+def score_questions(
+    questions,
+    answers,
+):
+    score = 0
+
+    for i, question in enumerate(
+        questions
+    ):
+
+        user_answer = str(
+            answers.get(
+                str(i),
+                "",
+            )
+        ).strip().lower()
+
+        correct_answer = (
+            str(
+                question.answer
+            )
+            .strip()
+            .lower()
         )
 
-    try:
-        import json
+        # --------------------------------------------
+        # No answer
+        # --------------------------------------------
 
-        parsed = json.loads(clean_json(raw))
+        if not user_answer:
+            continue
 
-        # Support both the desired object format and a raw array in case a
-        # local model ignores the exact JSON wrapper.
-        if isinstance(parsed, dict):
-            items = parsed.get("questions", [])
-        else:
-            items = parsed
+        # --------------------------------------------
+        # MCQ / True False
+        # --------------------------------------------
 
-        if not isinstance(items, list) or not items:
-            raise ValueError("Llama did not return a question list.")
+        if question.type in {
+            "MCQ",
+            "True / False",
+        }:
 
-        validated = []
-        seen = set()
+            if user_answer == correct_answer:
+                score += 1
 
-        for item in items:
-            q = QuizQuestion(**item)
+            continue
 
-            question_key = " ".join(q.question.lower().split())
-            if not question_key or question_key in seen:
-                continue
+        # --------------------------------------------
+        # Short Answer
+        # --------------------------------------------
 
-            if q.type == "MCQ":
-                if len(q.options) != 4:
-                    continue
+        if question.type == "Short Answer":
 
-                normalized_options = [
-                    str(option).strip().lower() for option in q.options
+            keywords = [
+                str(k).strip().lower()
+                for k in question.keywords
+                if str(k).strip()
+            ]
+
+            if keywords:
+
+                matched = sum(
+                    1
+                    for keyword in keywords
+                    if keyword in user_answer
+                )
+
+                if matched >= 1:
+                    score += 1
+
+            else:
+
+                answer_words = [
+                    word
+                    for word in correct_answer.split()
+                    if len(word) > 3
                 ]
 
-                if len(set(normalized_options)) != 4:
-                    continue
+                if answer_words:
 
-                if q.answer.strip().lower() not in normalized_options:
-                    continue
+                    matched = sum(
+                        1
+                        for word in answer_words
+                        if word in user_answer
+                    )
 
-            elif q.type == "True / False":
-                if q.answer.strip().lower() not in {"true", "false"}:
-                    continue
+                    if (
+                        matched
+                        >= max(
+                            1,
+                            len(answer_words) // 3,
+                        )
+                    ):
+                        score += 1
 
-            elif q.type == "Short Answer":
-                if not q.answer.strip():
-                    continue
+                elif (
+                    user_answer
+                    == correct_answer
+                ):
+                    score += 1
 
-            seen.add(question_key)
-            validated.append(q)
+    return score
 
-            if len(validated) == req.count:
-                break
 
-        if len(validated) < req.count:
+# ============================================================
+# HEALTH
+# ============================================================
+
+@app.get("/")
+def health():
+    return {
+        "name": "QuizMate AI",
+        "status": "ok",
+        "ollama": OLLAMA_BASE_URL,
+        "model": OLLAMA_MODEL,
+    }
+
+
+# ============================================================
+# TOPIC API
+# ============================================================
+
+@app.get("/api/topics")
+def topics():
+
+    return [
+        {
+            "name": name,
+            "description": (
+                "Practice important concepts with AI."
+            ),
+        }
+        for name in load_topics()
+    ]
+
+
+@app.get("/api/topics/{topic_name}")
+def topic_content(
+    topic_name: str,
+):
+
+    data = load_topics()
+
+    if topic_name not in data:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Topic not found",
+        )
+
+    return {
+        "name": topic_name,
+        "text": data[topic_name],
+    }
+
+
+# ============================================================
+# AUTH REGISTER
+# ============================================================
+
+@app.post(
+    "/api/auth/register",
+    response_model=TokenOut,
+)
+def register(
+    req: AuthIn,
+):
+
+    if (
+        not req.name
+        or len(req.password) < 6
+    ):
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Name and password "
+                "(6+ characters) are required."
+            ),
+        )
+
+    email = req.email.strip().lower()
+
+    con = get_db()
+
+    try:
+
+        cur = con.execute(
+            """
+            INSERT INTO users(
+                name,
+                email,
+                password_hash
+            )
+            VALUES(?,?,?)
+            """,
+            (
+                req.name.strip(),
+                email,
+                hash_password(
+                    req.password
+                ),
+            ),
+        )
+
+        con.commit()
+
+        user_id = cur.lastrowid
+
+    except sqlite3.IntegrityError:
+
+        con.close()
+
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "An account with this "
+                "email already exists."
+            ),
+        )
+
+    finally:
+
+        try:
+            con.close()
+        except Exception:
+            pass
+
+    return {
+        "token": make_token(
+            user_id,
+            email,
+        ),
+        "user": {
+            "id": user_id,
+            "name": req.name.strip(),
+            "email": email,
+        },
+    }
+
+
+# ============================================================
+# AUTH LOGIN
+# ============================================================
+
+@app.post(
+    "/api/auth/login",
+    response_model=TokenOut,
+)
+def login(
+    req: AuthIn,
+):
+
+    email = req.email.strip().lower()
+
+    con = get_db()
+
+    row = con.execute(
+        """
+        SELECT *
+        FROM users
+        WHERE email=?
+        """,
+        (email,),
+    ).fetchone()
+
+    con.close()
+
+    if (
+        not row
+        or not verify_password(
+            req.password,
+            row["password_hash"],
+        )
+    ):
+
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid email or password.",
+        )
+
+    return {
+        "token": make_token(
+            row["id"],
+            row["email"],
+        ),
+        "user": {
+            "id": row["id"],
+            "name": row["name"],
+            "email": row["email"],
+        },
+    }
+
+
+# ============================================================
+# GENERATE QUIZ
+# ============================================================
+
+@app.post(
+    "/api/quiz/generate",
+    response_model=QuizOut,
+)
+def quiz_generate(
+    req: QuizRequest,
+    user=Depends(current_user),
+):
+
+    questions = generate_questions(
+        req
+    )
+
+    return {
+        "questions": questions
+    }
+
+
+# ============================================================
+# SUBMIT QUIZ
+# ============================================================
+
+@app.post("/api/quiz/submit")
+def quiz_submit(
+    req: SubmitRequest,
+    user=Depends(current_user),
+):
+
+    try:
+
+        if not req.questions:
             raise HTTPException(
-                status_code=502,
+                status_code=400,
+                detail="No quiz questions supplied.",
+            )
+
+        if not isinstance(
+            req.answers,
+            dict,
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Answers must be an object.",
+            )
+
+        print(
+            "\n========== QUIZ SUBMIT =========="
+        )
+
+        print(
+            "USER ID:",
+            user["id"],
+        )
+
+        print(
+            "SOURCE:",
+            req.source_name,
+        )
+
+        print(
+            "QUESTION COUNT:",
+            len(req.questions),
+        )
+
+        print(
+            "ANSWER COUNT:",
+            len(req.answers),
+        )
+
+        print(
+            "ANSWERS:",
+            req.answers,
+        )
+
+        score = score_questions(
+            req.questions,
+            req.answers,
+        )
+
+        total = len(
+            req.questions
+        )
+
+        con = get_db()
+
+        con.execute(
+            """
+            INSERT INTO results(
+                user_id,
+                topic,
+                score,
+                total,
+                difficulty,
+                created_at
+            )
+            VALUES(?,?,?,?,?,?)
+            """,
+            (
+                user["id"],
+                req.source_name,
+                score,
+                total,
+                req.difficulty,
+                datetime.now(
+                    timezone.utc
+                ).isoformat(),
+            ),
+        )
+
+        con.commit()
+        con.close()
+
+        percentage = (
+            round(
+                score / total * 100
+            )
+            if total
+            else 0
+        )
+
+        print(
+            "SCORE:",
+            score,
+            "/",
+            total,
+        )
+
+        print(
+            "PERCENTAGE:",
+            percentage,
+        )
+
+        print(
+            "=================================\n"
+        )
+
+        return {
+            "score": score,
+            "total": total,
+            "percentage": percentage,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+
+        print(
+            "\n========== QUIZ SUBMIT ERROR =========="
+        )
+
+        print(
+            "ERROR:",
+            repr(e),
+        )
+
+        import traceback
+
+        traceback.print_exc()
+
+        print(
+            "========================================\n"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Quiz submission failed: {str(e)}"
+            ),
+        )
+
+
+# ============================================================
+# RESULTS
+# ============================================================
+
+@app.get("/api/results")
+def results(
+    user=Depends(current_user),
+):
+
+    con = get_db()
+
+    rows = [
+        dict(row)
+        for row in con.execute(
+            """
+            SELECT
+                topic,
+                score,
+                total,
+                difficulty,
+                created_at
+            FROM results
+            WHERE user_id=?
+            ORDER BY id DESC
+            """,
+            (user["id"],),
+        ).fetchall()
+    ]
+
+    con.close()
+
+    return rows
+
+
+# ============================================================
+# DOCUMENT EXTRACTION
+# ============================================================
+
+def extract_text_from_file(
+    file_path: str,
+    filename: str,
+) -> str:
+
+    extension = (
+        filename
+        .lower()
+        .split(".")[-1]
+    )
+
+    # ========================================================
+    # PDF
+    # ========================================================
+
+    if extension == "pdf":
+
+        text_parts = []
+
+        doc = fitz.open(
+            file_path
+        )
+
+        try:
+
+            for page in doc:
+
+                text = page.get_text()
+
+                if text:
+                    text_parts.append(
+                        text
+                    )
+
+        finally:
+
+            doc.close()
+
+        return "\n".join(
+            text_parts
+        ).strip()
+
+    # ========================================================
+    # DOCX
+    # ========================================================
+
+    if extension == "docx":
+
+        document = Document(
+            file_path
+        )
+
+        text_parts = []
+
+        for paragraph in (
+            document.paragraphs
+        ):
+
+            text = (
+                paragraph.text
+                .strip()
+            )
+
+            if text:
+                text_parts.append(
+                    text
+                )
+
+        for table in (
+            document.tables
+        ):
+
+            for row in table.rows:
+
+                row_text = []
+
+                for cell in row.cells:
+
+                    cell_text = (
+                        cell.text
+                        .strip()
+                    )
+
+                    if cell_text:
+                        row_text.append(
+                            cell_text
+                        )
+
+                if row_text:
+                    text_parts.append(
+                        " | ".join(
+                            row_text
+                        )
+                    )
+
+        return "\n".join(
+            text_parts
+        ).strip()
+
+    raise ValueError(
+        "Unsupported file type. "
+        "Only PDF and DOCX files are supported."
+    )
+
+
+@app.post("/api/pdf/extract")
+async def extract_document(
+    file: UploadFile = File(...),
+):
+
+    filename = file.filename or ""
+
+    extension = (
+        filename
+        .lower()
+        .split(".")[-1]
+    )
+
+    if extension not in {
+        "pdf",
+        "docx",
+    }:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Only PDF and DOCX "
+                "files are supported."
+            ),
+        )
+
+    temp_path = None
+
+    try:
+
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=f".{extension}",
+        ) as temp_file:
+
+            content = await file.read()
+
+            if not content:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Uploaded file is empty.",
+                )
+
+            # Keep the existing UI's 10 MB upload limit enforced
+            # on the backend as well.
+            max_file_size = 10 * 1024 * 1024
+
+            if len(content) > max_file_size:
+                raise HTTPException(
+                    status_code=413,
+                    detail="File is too large. Maximum size is 10 MB.",
+                )
+
+            temp_file.write(
+                content
+            )
+
+            temp_path = (
+                temp_file.name
+            )
+
+        text = extract_text_from_file(
+            temp_path,
+            filename,
+        )
+
+        if not text.strip():
+
+            raise HTTPException(
+                status_code=400,
                 detail=(
-                    f"Llama generated only {len(validated)} valid questions out of "
-                    f"{req.count}. Try again or upload a document with more detailed content."
+                    "Could not extract any text "
+                    "from this document."
                 ),
             )
 
         print(
-            f"RAG SUCCESS: {len(validated)} questions generated from "
-            f"{len(retrieved)} retrieved chunks using {OLLAMA_EMBED_MODEL}"
+            "DOCUMENT EXTRACTED:",
+            filename,
+            "characters:",
+            len(text),
         )
 
-        return validated
+        return {
+            "filename": filename,
+            "text": text,
+            "file_type": extension,
+        }
 
     except HTTPException:
         raise
+
     except Exception as e:
-        print("RAG QUIZ PARSE ERROR:", repr(e))
-        print("RAW LLAMA RESPONSE:", raw[:3000])
+
+        print(
+            "Document extraction error:",
+            repr(e),
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Failed to process document: {str(e)}"
+            ),
+        )
+
+    finally:
+
+        if (
+            temp_path
+            and os.path.exists(temp_path)
+        ):
+
+            try:
+                os.remove(
+                    temp_path
+                )
+            except Exception:
+                pass
+
+
+# ============================================================
+# SUMMARY
+# ============================================================
+
+@app.post("/api/summary")
+def summary(
+    req: SummaryRequest,
+    user=Depends(current_user),
+):
+
+    text = req.text.strip()
+
+    if len(text) < 20:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Document text is too short "
+                "to summarize."
+            ),
+        )
+
+    prompt = f"""
+You are QuizMate AI.
+
+Summarize ONLY the document below.
+
+SUMMARY STYLE:
+{req.mode}
+
+IMPORTANT:
+
+1. Use only information from the document.
+2. Do not invent facts.
+3. The summary must not be empty.
+4. Make the summary useful for studying.
+5. Return ONLY valid JSON.
+6. Do not return markdown.
+7. Do not return ```json.
+
+Return EXACTLY:
+
+{{
+  "summary": "Your complete summary here."
+}}
+
+DOCUMENT:
+
+<DOCUMENT>
+{text[:40000]}
+</DOCUMENT>
+"""
+
+    try:
+
+        raw = call_ai(
+            prompt
+        )
+
+        parsed = parse_ai_json(
+            raw
+        )
+
+        if not isinstance(
+            parsed,
+            dict,
+        ):
+
+            raise ValueError(
+                "Summary response is not a JSON object."
+            )
+
+        summary_text = str(
+            parsed.get(
+                "summary",
+                "",
+            )
+        ).strip()
+
+        # ====================================================
+        # IMPORTANT FALLBACK
+        # ====================================================
+
+        if not summary_text:
+
+            print(
+                "SUMMARY JSON WAS EMPTY. "
+                "Retrying without JSON mode."
+            )
+
+            fallback_payload = {
+                "model": OLLAMA_MODEL,
+
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a document summarization "
+                            "assistant. Summarize only the supplied "
+                            "document. Do not invent information."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": f"""
+Summarize this document.
+
+Style:
+{req.mode}
+
+Document:
+{text[:40000]}
+""",
+                    },
+                ],
+
+                "stream": False,
+
+                "options": {
+                    "temperature": 0.2,
+                },
+            }
+
+            fallback_data = ollama_post(
+                "/api/chat",
+                fallback_payload,
+                timeout=300,
+            )
+
+            summary_text = (
+                fallback_data
+                .get("message", {})
+                .get("content", "")
+                .strip()
+            )
+
+        if not summary_text:
+
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Ollama returned an empty summary."
+                ),
+            )
+
+        print(
+            "SUMMARY SUCCESS:",
+            len(summary_text),
+            "characters",
+        )
+
+        return {
+            "summary": summary_text
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+
+        print(
+            "SUMMARY ERROR:",
+            repr(e),
+        )
+
+        import traceback
+
+        traceback.print_exc()
 
         raise HTTPException(
             status_code=502,
-            detail="Llama returned an invalid quiz format. Please generate the quiz again.",
+            detail=(
+                "Failed to generate document summary."
+            ),
         )
-
-def score_questions(questions, answers):
-    score = 0
-    for i, q in enumerate(questions):
-        user = str(answers.get(str(i), "")).strip().lower()
-        correct = str(q.answer).strip().lower()
-        if q.type == "Short Answer":
-            kws = [str(k).lower() for k in q.keywords]
-            if kws and any(k in user for k in kws):
-                score += 1
-        elif user == correct:
-            score += 1
-    return score
-
-@app.get("/")
-def health():
-    return {"name": "QuizMate AI", "status": "ok"}
-
-@app.get("/api/topics")
-def topics():
-    return [{"name": name, "description": "Practice important concepts with AI."} for name in load_topics()]
-
-@app.get("/api/topics/{topic_name}")
-def topic_content(topic_name: str):
-    data = load_topics()
-    if topic_name not in data:
-        raise HTTPException(status_code=404, detail="Topic not found")
-    return {"name": topic_name, "text": data[topic_name]}
-
-@app.post("/api/auth/register", response_model=TokenOut)
-def register(req: AuthIn):
-    if not req.name or len(req.password) < 6:
-        raise HTTPException(status_code=400, detail="Name and password (6+ characters) are required.")
-    con = get_db()
-    try:
-        cur = con.execute(
-            "INSERT INTO users(name,email,password_hash) VALUES(?,?,?)",
-            (req.name.strip(), req.email.lower(), hash_password(req.password))
-        )
-        con.commit()
-        user_id = cur.lastrowid
-    except sqlite3.IntegrityError:
-        con.close()
-        raise HTTPException(status_code=409, detail="An account with this email already exists.")
-    con.close()
-    return {"token": make_token(user_id, req.email.lower()), "user": {"id": user_id, "name": req.name, "email": req.email.lower()}}
-
-@app.post("/api/auth/login", response_model=TokenOut)
-def login(req: AuthIn):
-    con = get_db()
-    row = con.execute("SELECT * FROM users WHERE email=?", (req.email.lower(),)).fetchone()
-    con.close()
-    if not row or not verify_password(req.password, row["password_hash"]):
-        raise HTTPException(status_code=401, detail="Invalid email or password.")
-    return {"token": make_token(row["id"], row["email"]), "user": {"id": row["id"], "name": row["name"], "email": row["email"]}}
-
-@app.post("/api/quiz/generate", response_model=QuizOut)
-def quiz_generate(req: QuizRequest, user=Depends(current_user)):
-    return {"questions": generate_questions(req)}
-
-@app.post("/api/quiz/submit")
-def quiz_submit(req: SubmitRequest, user=Depends(current_user)):
-    score = score_questions(req.questions, req.answers)
-    total = len(req.questions)
-    con = get_db()
-    con.execute(
-        "INSERT INTO results(user_id,topic,score,total,difficulty,created_at) VALUES(?,?,?,?,?,?)",
-        (user["id"], req.source_name, score, total, req.difficulty, datetime.now().isoformat())
-    )
-    
-    con.commit()
-    con.close()
-    pct = round(score / total * 100) if total else 0
-    return {"score": score, "total": total, "percentage": pct}
-
-@app.get("/api/results")
-def results(user=Depends(current_user)):
-    con = get_db()
-    rows = [dict(r) for r in con.execute(
-        "SELECT topic, score, total, difficulty, created_at FROM results WHERE user_id=? ORDER BY id DESC",
-        (user["id"],)
-    ).fetchall()]
-    con.close()
-    return rows
-
-@app.post("/api/pdf/extract")
-async def extract_pdf(file: UploadFile = File(...), user=Depends(current_user)):
-    if file.content_type != "application/pdf":
-        raise HTTPException(status_code=400, detail="Please upload a PDF.")
-    data = await file.read()
-    if len(data) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="PDF is too large. Please keep it under 10 MB.")
-    try:
-        doc = fitz.open(stream=data, filetype="pdf")
-        text = "\n".join(page.get_text("text") for page in doc)
-        doc.close()
-    except Exception:
-        raise HTTPException(
-            status_code=400,
-            detail="We couldn't read this PDF. Please try another PDF."
-        )
-
-    text = "\n".join(line.strip() for line in text.splitlines() if line.strip())
-
-    if len(text) < 100:
-        raise HTTPException(
-            status_code=400,
-            detail="This PDF has little or no selectable text. Please upload a text-based PDF."
-        )
-
-    return {"filename": file.filename, "text": text}
-
-@app.post("/api/summary")
-def summary(req: SummaryRequest, user=Depends(current_user)):
-    prompt = f"""
-You are QuizMate AI.
-Summarize ONLY the document below.
-Style: {req.mode}
-Use clear headings and bullet points.
-Do not invent facts.
-
-Document:
-{req.text[:40000]}
-"""
-    result = call_ai(prompt)
-    if result:
-        return {"summary": result}
-    raise HTTPException(status_code=503, detail="Local Llama summary generation failed. Check Ollama.")
