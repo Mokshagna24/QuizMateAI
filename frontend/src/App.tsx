@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Navigate,
   Route,
@@ -23,6 +23,7 @@ import {
   Target,
   History,
   X,
+  Youtube,
 } from "lucide-react";
 
 import api, { setToken } from "./api";
@@ -42,13 +43,16 @@ function Layout({
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
-
+  
   const links = [
     ["/dashboard", "Dashboard", Home],
     ["/topics", "Popular Topics", BookOpen],
     ["/upload", "Upload Notes", Upload],
     ["/summarize", "Summarize", FileText],
     ["/progress", "My Progress", BarChart3],
+    ["/generate-topic", "Generate from Topic", Sparkles],
+    ["/youtube", "YouTube Quiz", Youtube],
+    ["/generate-information", "Generate from Information", FileText],
   ] as const;
 
   return (
@@ -178,6 +182,7 @@ function Auth({
           <span>✨ AI Quiz Generator</span>
           <span>📄 PDF Summarizer</span>
           <span>📊 Learning Progress</span>
+          <span>🎥 YouTube Quiz Generator</span>
         </div>
       </div>
 
@@ -286,38 +291,41 @@ function Auth({
 
 function Dashboard({ user }: { user: User }) {
   const nav = useNavigate();
+  const [rows, setRows] = useState<any[]>([]);
+
+  useEffect(() => {
+    api.get("/api/results")
+      .then((r) => setRows(Array.isArray(r.data) ? r.data : []))
+      .catch(() => setRows([]));
+  }, []);
+
+  const recent = [...rows].reverse().slice(-7);
+  const average = rows.length
+    ? Math.round(
+        rows.reduce((sum, r) => sum + ((r.score || 0) / Math.max(r.total || 1, 1)) * 100, 0) / rows.length
+      )
+    : 0;
 
   return (
     <>
       <div className="hero">
         <div>
-          <div className="eyebrow">
-            YOUR PERSONAL AI STUDY SPACE
-          </div>
-
-          <h1>
-            Hello, {user.name}! 👋
-          </h1>
-
-          <p>
-            What would you like to learn today?
-          </p>
+          <div className="eyebrow">YOUR PERSONAL AI STUDY SPACE</div>
+          <h1>Hello, {user.name}! 👋</h1>
+          <p>What would you like to learn today?</p>
         </div>
-
-        <div className="hero-art">
-          <Sparkles size={34} />
-        </div>
+        <div className="hero-art"><Sparkles size={34} /></div>
       </div>
 
-      <div className="grid-4">
-        <ActionCard
-          icon={<Target />}
-          title="Start a Quiz"
-          text="Choose a popular topic and test your knowledge."
-          button="Practice a Topic"
-          onClick={() => nav("/topics")}
-        />
-
+      {/* Exactly 3 cards in the first row and 3 in the second row. */}
+      <div
+        className="grid-4 dashboard-actions"
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+          gap: "20px",
+        }}
+      >
         <ActionCard
           icon={<Sparkles />}
           title="Generate from Topic"
@@ -335,20 +343,54 @@ function Dashboard({ user }: { user: User }) {
         />
 
         <ActionCard
+          icon={<Youtube />}
+          title="Generate from YouTube"
+          text="Paste a YouTube link and create a quiz from its transcript."
+          button="Use YouTube"
+          onClick={() => nav("/youtube")}
+        />
+
+        <ActionCard
           icon={<FileText />}
+          title="Generate from Information"
+          text="Paste your own information, notes, or study text and generate a quiz."
+          button="Enter Information"
+          onClick={() => nav("/generate-information")}
+        />
+
+        <ActionCard
+          icon={<BookOpen />}
           title="Summarize Notes"
           text="Turn long PDF or DOCX study material into quick revision notes."
           button="Summarize"
           onClick={() => nav("/summarize")}
         />
+
+        <ActionCard
+          icon={<Target />}
+          title="Start Quiz with Popular Topics"
+          text="Choose from your available popular topics and start practicing instantly."
+          button="Choose Topic"
+          onClick={() => nav("/topics")}
+        />
       </div>
 
       <div className="section-head">
-        <h2>Why QuizMate AI?</h2>
+        <h2>My Learning Progress</h2>
+        <span>Track your performance directly from the dashboard.</span>
+      </div>
 
-        <span>
-          Simple for students. Smart enough for serious practice.
-        </span>
+      <div className="metrics">
+        <Metric label="Quizzes Completed" value={rows.length} />
+        <Metric label="Questions Attempted" value={rows.reduce((sum, r) => sum + (r.total || 0), 0)} />
+        <Metric label="Average Score" value={`${average}%`} />
+      </div>
+
+      <ProgressChart rows={recent} />
+
+      <div className="section-head">
+        <h2>Why QuizMate AI?</h2>
+        <span>Simple for students. Smart enough for serious practice.</span>
       </div>
 
       <div className="grid-4">
@@ -358,35 +400,82 @@ function Dashboard({ user }: { user: User }) {
           "Upload your own notes",
           "Progress insights",
         ].map((x, i) => {
-          const icons = [
-            Sparkles,
-            Target,
-            Upload,
-            BarChart3,
-          ];
-
+          const icons = [Sparkles, Target, Upload, BarChart3];
           const Icon = icons[i];
-
           return (
-            <div
-              className="info-card"
-              key={x}
-            >
-              <div className="icon-box">
-                <Icon size={20} />
-              </div>
-
+            <div className="info-card" key={x}>
+              <div className="icon-box"><Icon size={20} /></div>
               <b>{x}</b>
-
-              <p>
-                Designed to keep learning fast
-                and focused.
-              </p>
+              <p>Designed to keep learning fast and focused.</p>
             </div>
           );
         })}
       </div>
     </>
+  );
+}
+
+/* =========================================================
+   DASHBOARD PROGRESS GRAPH
+========================================================= */
+
+function ProgressChart({ rows }: { rows: any[] }) {
+  const width = 640;
+  const height = 240;
+  const padX = 45;
+  const padY = 30;
+  const chartW = width - padX * 2;
+  const chartH = height - padY * 2;
+
+  const points = rows.map((r, i) => {
+    const pct = Math.max(0, Math.min(100, ((r.score || 0) / Math.max(r.total || 1, 1)) * 100));
+    const x = rows.length === 1 ? width / 2 : padX + (i * chartW) / (rows.length - 1);
+    const y = padY + chartH - (pct / 100) * chartH;
+    return { x, y, pct, label: r.topic || `Quiz ${i + 1}` };
+  });
+
+  const path = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
+
+  return (
+    <div className="history-card progress-chart-card">
+      <div className="section-head">
+        <div>
+          <h2>Performance Trend</h2>
+          <span>Latest quiz scores</span>
+        </div>
+        <BarChart3 size={20} />
+      </div>
+
+      {rows.length === 0 ? (
+        <div className="empty">Complete a quiz to see your performance graph here.</div>
+      ) : (
+        <div style={{ width: "100%", overflowX: "auto" }}>
+          <svg viewBox={`0 0 ${width} ${height}`} width="100%" role="img" aria-label="Student quiz performance graph">
+            {[0, 25, 50, 75, 100].map((v) => {
+              const y = padY + chartH - (v / 100) * chartH;
+              return (
+                <g key={v}>
+                  <line x1={padX} y1={y} x2={width - padX} y2={y} stroke="currentColor" opacity="0.12" />
+                  <text x="8" y={y + 4} fontSize="11" fill="currentColor" opacity="0.65">{v}%</text>
+                </g>
+              );
+            })}
+
+            {path && (
+              <path d={path} fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" opacity="0.85" />
+            )}
+
+            {points.map((p, i) => (
+              <g key={`${p.label}-${i}`}>
+                <circle cx={p.x} cy={p.y} r="6" fill="currentColor" />
+                <text x={p.x} y={p.y - 12} textAnchor="middle" fontSize="11" fill="currentColor">{Math.round(p.pct)}%</text>
+                <text x={p.x} y={height - 8} textAnchor="middle" fontSize="9" fill="currentColor" opacity="0.65">{String(i + 1)}</text>
+              </g>
+            ))}
+          </svg>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -620,13 +709,16 @@ function QuizConfig({
   onQuiz: (
     q: Question[],
     name: string,
-    diff: string
+    diff: string,
+    durationMinutes: number
   ) => void;
 }) {
   const [count, setCount] = useState(10);
   const [type, setType] = useState("MCQ");
   const [difficulty, setDifficulty] =
     useState("Medium");
+  const [durationMinutes, setDurationMinutes] =
+    useState(0); // 0 = no time limit
 
   const [loading, setLoading] =
     useState(false);
@@ -661,7 +753,8 @@ function QuizConfig({
       onQuiz(
         r.data.questions,
         sourceName,
-        difficulty
+        difficulty,
+        durationMinutes
       );
     } catch (e: any) {
       setError(
@@ -714,6 +807,22 @@ function QuizConfig({
             "Medium",
             "Hard",
             "Mixed",
+          ]}
+        />
+
+        <Select
+          label="Test duration"
+          value={durationMinutes === 0 ? "No limit" : String(durationMinutes)}
+          set={(v) => setDurationMinutes(v === "No limit" ? 0 : Number(v))}
+          options={[
+            "No limit",
+            "5",
+            "10",
+            "15",
+            "20",
+            "30",
+            "45",
+            "60",
           ]}
         />
       </div>
@@ -788,11 +897,13 @@ function Quiz({
   questions,
   sourceName,
   difficulty,
+  durationMinutes,
   onDone,
 }: {
   questions: Question[];
   sourceName: string;
   difficulty: string;
+  durationMinutes: number;
   onDone: (
     result: any,
     answers: Record<string, string>
@@ -802,14 +913,24 @@ function Quiz({
     useState<Record<string, string>>({});
 
   const [index, setIndex] = useState(0);
+  const [timeLeft, setTimeLeft] = useState(
+    durationMinutes > 0 ? durationMinutes * 60 : 0
+  );
+  const [submitting, setSubmitting] = useState(false);
+  const answersRef = useRef<Record<string, string>>({});
+  const submittedRef = useRef(false);
 
   const q = questions[index];
 
   const answer = (v: string) => {
-    setAnswers((a) => ({
-      ...a,
-      [String(index)]: v,
-    }));
+    setAnswers((a) => {
+      const next = {
+        ...a,
+        [String(index)]: v,
+      };
+      answersRef.current = next;
+      return next;
+    });
   };
 
   if (!q) {
@@ -820,7 +941,14 @@ function Quiz({
     );
   }
 
-  const submit = async () => {
+  const submit = async (autoSubmit = false) => {
+    if (submittedRef.current || submitting) return;
+
+    submittedRef.current = true;
+    setSubmitting(true);
+
+    const finalAnswers = answersRef.current;
+
     try {
       const r = await api.post(
         "/api/quiz/submit",
@@ -828,17 +956,48 @@ function Quiz({
           source_name: sourceName,
           difficulty,
           questions,
-          answers,
+          answers: finalAnswers,
         }
       );
 
-      onDone(r.data, answers);
+      onDone(r.data, finalAnswers);
     } catch (e: any) {
+      submittedRef.current = false;
+      setSubmitting(false);
       alert(
         e?.response?.data?.detail ||
-          "Could not submit quiz."
+          (autoSubmit
+            ? "Time expired, but the quiz could not be submitted. Please try again."
+            : "Could not submit quiz.")
       );
     }
+  };
+
+  useEffect(() => {
+    if (durationMinutes <= 0 || submittedRef.current) return;
+
+    if (timeLeft <= 0) {
+      submit(true);
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      setTimeLeft((current) => {
+        if (current <= 1) {
+          window.clearInterval(timer);
+          return 0;
+        }
+        return current - 1;
+      });
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [durationMinutes, timeLeft]);
+
+  const formatTime = (seconds: number) => {
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    return `${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`;
   };
 
   const progress =
@@ -853,9 +1012,21 @@ function Quiz({
         </span>
 
         <span>
-          {Math.round(progress)}%
+          {durationMinutes > 0 ? (
+            <>
+              ⏱ {formatTime(timeLeft)} &nbsp;•&nbsp; {Math.round(progress)}%
+            </>
+          ) : (
+            <>{Math.round(progress)}%</>
+          )}
         </span>
       </div>
+
+      {durationMinutes > 0 && timeLeft <= 60 && timeLeft > 0 && (
+        <div className="error" style={{ marginBottom: 12 }}>
+          ⏰ Less than one minute remaining. Your quiz will be submitted automatically when the timer reaches 00:00.
+        </div>
+      )}
 
       <div className="progress">
         <div
@@ -957,6 +1128,7 @@ function Quiz({
           questions.length - 1 ? (
             <button
               className="primary"
+              disabled={submitting}
               onClick={() =>
                 setIndex(index + 1)
               }
@@ -967,7 +1139,8 @@ function Quiz({
           ) : (
             <button
               className="primary"
-              onClick={submit}
+              disabled={submitting}
+              onClick={() => submit(false)}
             >
               Submit Quiz
               <CheckCircle2 size={17} />
@@ -992,69 +1165,60 @@ function Results({
   questions: Question[];
   answers: Record<string, string>;
 }) {
+  const normalize = (v: string) => String(v || "").trim().toLowerCase();
+
+  const isCorrect = (q: Question, userAnswer: string) => {
+    const user = normalize(userAnswer);
+    const correct = normalize(q.answer);
+    if (!user) return false;
+    if (q.type === "MCQ" || q.type === "True / False") return user === correct;
+    const keywords = Array.isArray((q as any).keywords) ? (q as any).keywords : [];
+    if (keywords.length) return keywords.some((k: string) => user.includes(normalize(k)));
+    return user === correct;
+  };
+
   return (
     <>
-      <PageTitle
-        title="🎉 Quiz Complete!"
-        subtitle="Here is your performance review."
-      />
+      <PageTitle title="🎉 Quiz Complete!" subtitle="Here is your performance review." />
 
       <div className="result-hero">
         <div className="score-ring">
           <b>{result.percentage}%</b>
-
-          <span>
-            {result.score}/{result.total}
-          </span>
+          <span>{result.score}/{result.total}</span>
         </div>
-
         <div>
-          <h2>
-            {result.percentage >= 80
-              ? "Excellent work!"
-              : result.percentage >= 60
-              ? "Good progress!"
-              : "Keep practicing!"}
-          </h2>
-
-          <p>
-            You completed the quiz successfully.
-          </p>
+          <h2>{result.percentage >= 80 ? "Excellent work!" : result.percentage >= 60 ? "Good progress!" : "Keep practicing!"}</h2>
+          <p>You completed the quiz successfully.</p>
         </div>
       </div>
 
+      <div className="review-legend" style={{ display: "flex", gap: 16, marginBottom: 16, flexWrap: "wrap" }}>
+        <span><b style={{ color: "#d93025" }}>● Wrong</b></span>
+        <span><b style={{ color: "#2563eb" }}>● Skipped</b></span>
+        <span><b style={{ color: "#15803d" }}>● Correct</b></span>
+      </div>
+
       <div className="review-list">
-        {questions.map((q, i) => (
-          <div
-            className="review"
-            key={i}
-          >
-            <div>
-              <b>
-                {i + 1}. {q.question}
-              </b>
+        {questions.map((q, i) => {
+          const userAnswer = answers[i] || "";
+          const skipped = !userAnswer.trim();
+          const correct = !skipped && isCorrect(q, userAnswer);
+          const statusClass = skipped ? "review skipped" : correct ? "review correct" : "review wrong";
 
-              <p>
-                Your answer:{" "}
-                <span>
-                  {answers[i] ||
-                    "Skipped"}
-                </span>
-              </p>
-
-              <p>
-                Correct answer:{" "}
-                <strong>
-                  {q.answer}
-                </strong>
-              </p>
-
-              <small>
-                {q.explanation}
-              </small>
+          return (
+            <div className={statusClass} key={i} style={{ borderLeft: skipped ? "5px solid #2563eb" : correct ? "5px solid #15803d" : "5px solid #d93025" }}>
+              <div>
+                <b>{i + 1}. {q.question}</b>
+                <p>
+                  Your answer: <span>{userAnswer || "Skipped"}</span>
+                  {skipped ? " — SKIPPED" : correct ? " — CORRECT" : " — WRONG"}
+                </p>
+                <p>Correct answer: <strong>{q.answer}</strong></p>
+                <small>{q.explanation}</small>
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </>
   );
@@ -1175,6 +1339,188 @@ function UploadPDF({
             {error}
           </div>
         )}
+      </div>
+    </>
+  );
+}
+
+/* =========================================================
+   YOUTUBE QUIZ GENERATOR
+========================================================= */
+
+function YouTubeGenerator({
+  onStart,
+}: {
+  onStart: (text: string, name: string) => void;
+}) {
+  const [url, setUrl] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async () => {
+    const value = url.trim();
+
+    if (!value) {
+      setError("Please paste a YouTube video URL.");
+      return;
+    }
+
+    if (
+      !/^https?:\/\/(www\.)?(youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/shorts\/|youtube\.com\/embed\/|youtube\.com\/live\/)/i.test(value)
+    ) {
+      setError("Please enter a valid YouTube video URL.");
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setError("");
+
+      const r = await api.post("/api/youtube/extract", {
+        url: value,
+      });
+
+      onStart(
+        r.data.text,
+        r.data.title || "YouTube Video"
+      );
+    } catch (e: any) {
+      setError(
+        e?.response?.data?.detail ||
+          "Could not read the YouTube transcript. Make sure captions/transcript are available."
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <>
+      <PageTitle
+        title="🎥 Generate a Quiz from YouTube"
+        subtitle="Paste a YouTube video link and QuizMate AI will use its transcript to create a quiz."
+      />
+
+      <div className="config-card">
+        <div className="source-pill">
+          🎥 YouTube Quiz Generator
+        </div>
+
+        <h2>Paste your YouTube video</h2>
+
+        <p className="muted">
+          Use an educational video with available captions or a transcript.
+          QuizMate will extract the transcript and continue to the normal quiz settings.
+        </p>
+
+        <label>
+          YouTube URL
+          <input
+            className="search"
+            value={url}
+            onChange={(e) => {
+              setUrl(e.target.value);
+              if (error) setError("");
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") submit();
+            }}
+            placeholder="https://www.youtube.com/watch?v=..."
+            autoFocus
+          />
+        </label>
+
+        {error && (
+          <div className="error">
+            {error}
+          </div>
+        )}
+
+        <button
+          className="primary big"
+          disabled={!url.trim() || loading}
+          onClick={submit}
+        >
+          {loading ? (
+            <>
+              <span className="spinner" />
+              Reading YouTube transcript...
+            </>
+          ) : (
+            <>
+              <Youtube size={18} />
+              Continue to Quiz Settings
+            </>
+          )}
+        </button>
+      </div>
+    </>
+  );
+}
+
+/* =========================================================
+   GENERATE FROM GIVEN INFORMATION
+========================================================= */
+
+function InformationGenerator({
+  onStart,
+}: {
+  onStart: (text: string, name: string) => void;
+}) {
+  const [text, setText] = useState("");
+  const [name, setName] = useState("My Information");
+  const [error, setError] = useState("");
+
+  const submit = () => {
+    const value = text.trim();
+    if (value.length < 20) {
+      setError("Please enter at least 20 characters of information.");
+      return;
+    }
+    setError("");
+    onStart(value, name.trim() || "My Information");
+  };
+
+  return (
+    <>
+      <PageTitle
+        title="📝 Generate Quiz from Given Information"
+        subtitle="Paste any study information, notes, article text, or content and let AI create a quiz."
+      />
+
+      <div className="config-card">
+        <div className="source-pill">🧠 Information Quiz Generator</div>
+
+        <label>
+          Information title
+          <input
+            className="search"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g. Operating Systems Notes"
+          />
+        </label>
+
+        <label>
+          Enter your information
+          <textarea
+            className="answer-box"
+            style={{ minHeight: 220 }}
+            value={text}
+            onChange={(e) => {
+              setText(e.target.value);
+              if (error) setError("");
+            }}
+            placeholder="Paste your study material here..."
+          />
+        </label>
+
+        {error && <div className="error">{error}</div>}
+
+        <button className="primary big" disabled={text.trim().length < 20} onClick={submit}>
+          <Sparkles size={18} />
+          Continue to Quiz Settings
+        </button>
       </div>
     </>
   );
@@ -1463,7 +1809,12 @@ export default function App() {
       text: string;
       name: string;
       topic?: string;
-      kind: "popular-topic" | "document" | "direct-topic";
+      kind:
+        | "popular-topic"
+        | "document"
+        | "direct-topic"
+        | "youtube"
+        | "information";
     } | null>(null);
 
   const [quiz, setQuiz] =
@@ -1475,6 +1826,7 @@ export default function App() {
     useState({
       name: "",
       difficulty: "Medium",
+      durationMinutes: 0,
     });
 
   const [result, setResult] =
@@ -1592,17 +1944,52 @@ export default function App() {
     nav("/generate-topic");
   };
 
+  /* Start quiz from user-provided information */
+  const startInformationQuiz = (
+    text: string,
+    name: string
+  ) => {
+    setSource({
+      text,
+      name,
+      kind: "information",
+    });
+    setQuiz(null);
+    setResult(null);
+    setAnswers({});
+    nav("/generate-information");
+  };
+
+  /* Start YouTube transcript quiz */
+  const startYouTubeQuiz = (
+    text: string,
+    name: string
+  ) => {
+    setSource({
+      text,
+      name,
+      kind: "youtube",
+    });
+
+    setQuiz(null);
+    setResult(null);
+    setAnswers({});
+    nav("/youtube");
+  };
+
   /* Quiz generated successfully */
   const handleQuizGenerated = (
     q: Question[],
     name: string,
-    difficulty: string
+    difficulty: string,
+    durationMinutes: number
   ) => {
     setQuiz(q);
 
     setQuizMeta({
       name,
       difficulty,
+      durationMinutes,
     });
 
     setResult(null);
@@ -1692,6 +2079,42 @@ export default function App() {
         )}
       />
 
+      {/* YOUTUBE QUIZ */}
+      <Route
+        path="/youtube"
+        element={guarded(
+          source?.kind === "youtube" ? (
+            <QuizConfig
+              sourceText={source.text}
+              sourceName={source.name}
+              onQuiz={handleQuizGenerated}
+            />
+          ) : (
+            <YouTubeGenerator
+              onStart={startYouTubeQuiz}
+            />
+          )
+        )}
+      />
+
+      {/* GENERATE FROM INFORMATION */}
+      <Route
+        path="/generate-information"
+        element={guarded(
+          source?.kind === "information" ? (
+            <QuizConfig
+              sourceText={source.text}
+              sourceName={source.name}
+              onQuiz={handleQuizGenerated}
+            />
+          ) : (
+            <InformationGenerator
+              onStart={startInformationQuiz}
+            />
+          )
+        )}
+      />
+
       {/* SUMMARIZER */}
       <Route
         path="/summarize"
@@ -1720,6 +2143,9 @@ export default function App() {
               }
               difficulty={
                 quizMeta.difficulty
+              }
+              durationMinutes={
+                quizMeta.durationMinutes
               }
               onDone={(
                 r,

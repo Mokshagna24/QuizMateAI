@@ -1,8 +1,8 @@
-
 import hashlib
 import hmac
 import json
 import os
+import re
 import sqlite3
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -25,7 +25,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
-
+from youtube_transcript_api import YouTubeTranscriptApi
 
 # ============================================================
 # ENVIRONMENT
@@ -149,6 +149,10 @@ class AuthIn(BaseModel):
 class TokenOut(BaseModel):
     token: str
     user: dict
+
+
+class YouTubeRequest(BaseModel):
+    url: str
 
 
 class QuizRequest(BaseModel):
@@ -839,12 +843,28 @@ def validate_questions(
                 )
                 continue
 
-            if (
-                question.answer
-                .strip()
-                .lower()
-                not in normalized_options
-            ):
+            # Llama may return the correct MCQ answer as either:
+            # 1) the option text, or
+            # 2) a 1-based option number such as "1", "2", "3", "4".
+            # Normalize both forms to the actual option text so the
+            # existing scoring/frontend contract remains unchanged.
+            answer_value = question.answer.strip()
+
+            if answer_value in {"1", "2", "3", "4"}:
+                answer_index = int(answer_value) - 1
+                question.answer = question.options[answer_index]
+                print(
+                    f"Normalized MCQ numeric answer {answer_value} "
+                    f"to option {answer_index + 1}."
+                )
+            elif answer_value.lower() in normalized_options:
+                # Preserve the existing answer text, normalized only by
+                # matching it to the canonical option spelling.
+                answer_index = normalized_options.index(
+                    answer_value.lower()
+                )
+                question.answer = question.options[answer_index]
+            else:
                 print(
                     "Skipping MCQ: "
                     "answer is not one of options."
@@ -2569,6 +2589,101 @@ async def extract_document(
                 )
             except Exception:
                 pass
+
+
+# ============================================================
+# YOUTUBE TRANSCRIPT EXTRACTION
+# ============================================================
+
+def extract_youtube_video_id(url: str):
+    """Extract a YouTube video ID from common YouTube URL formats."""
+    patterns = [
+        r"(?:youtube\.com/watch\?v=)([^&]+)",
+        r"(?:youtu\.be/)([^?&]+)",
+        r"(?:youtube\.com/shorts/)([^?&]+)",
+        r"(?:youtube\.com/embed/)([^?&]+)",
+        r"(?:youtube\.com/live/)([^?&]+)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, url, re.IGNORECASE)
+        if match:
+            return match.group(1)
+
+    return None
+
+
+@app.post("/api/youtube/extract")
+def extract_youtube(
+    req: YouTubeRequest,
+    user=Depends(current_user),
+):
+    """Extract an accessible YouTube transcript and return it as source_text."""
+    video_id = extract_youtube_video_id(req.url.strip())
+
+    if not video_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid YouTube video URL.",
+        )
+
+    try:
+        print("YOUTUBE VIDEO ID:", video_id)
+
+        transcript = YouTubeTranscriptApi().fetch(video_id)
+
+        text_parts = []
+
+        for item in transcript:
+            if hasattr(item, "text"):
+                value = item.text
+            elif isinstance(item, dict):
+                value = item.get("text", "")
+            else:
+                value = str(item)
+
+            if value and str(value).strip():
+                text_parts.append(str(value).strip())
+
+        text = " ".join(text_parts).strip()
+
+        if not text:
+            raise HTTPException(
+                status_code=404,
+                detail="No transcript/captions were found for this YouTube video.",
+            )
+
+        print(
+            "YOUTUBE TRANSCRIPT EXTRACTED:",
+            len(text),
+            "characters",
+        )
+
+        return {
+            "success": True,
+            "video_id": video_id,
+            "title": f"YouTube Video ({video_id})",
+            "text": text,
+            "source_text": text,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        print(
+            "YOUTUBE TRANSCRIPT ERROR:",
+            repr(e),
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Could not extract the YouTube transcript. "
+                "Make sure the video is accessible and has captions/transcript. "
+                f"Error: {str(e)}"
+            ),
+        )
 
 
 # ============================================================
