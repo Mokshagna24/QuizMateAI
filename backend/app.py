@@ -13,3 +13,4 @@ from .routes import results  # noqa: F401,E402
 from .routes import summary  # noqa: F401,E402
 from .routes import topics  # noqa: F401,E402
 from .routes import youtube  # noqa: F401,E402
+from .routes import feedback

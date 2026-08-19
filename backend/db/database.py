@@ -12,6 +12,10 @@ def get_db():
 def init_db():
     con = get_db()
 
+    # ========================================================
+    # USERS TABLE
+    # ========================================================
+
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS users(
@@ -23,6 +27,10 @@ def init_db():
         """
     )
 
+    # ========================================================
+    # RESULTS TABLE
+    # ========================================================
+
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS results(
@@ -32,6 +40,24 @@ def init_db():
             score INTEGER NOT NULL,
             total INTEGER NOT NULL,
             difficulty TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+        """
+    )
+
+    # ========================================================
+    # FEEDBACK TABLE
+    # ========================================================
+
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS feedback(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            experience TEXT NOT NULL,
+            usefulness TEXT NOT NULL,
+            improvement TEXT,
             created_at TEXT NOT NULL,
             FOREIGN KEY(user_id) REFERENCES users(id)
         )

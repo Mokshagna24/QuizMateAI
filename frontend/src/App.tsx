@@ -27,6 +27,7 @@ import {
 } from "lucide-react";
 
 import api, { setToken } from "./api";
+import Feedback from "./Feedback";
 import type { Question, User } from "./types";
 
 /* =========================================================
@@ -2133,42 +2134,46 @@ export default function App() {
 
       {/* QUIZ */}
       <Route
-        path="/quiz"
-        element={guarded(
-          quiz && !result ? (
-            <Quiz
-              questions={quiz}
-              sourceName={
-                quizMeta.name
-              }
-              difficulty={
-                quizMeta.difficulty
-              }
-              durationMinutes={
-                quizMeta.durationMinutes
-              }
-              onDone={(
-                r,
-                a
-              ) => {
-                setResult(r);
-                setAnswers(a);
-              }}
-            />
-          ) : result ? (
-            <Results
-              result={result}
-              questions={quiz || []}
-              answers={answers}
-            />
-          ) : (
-            <Navigate
-              to="/dashboard"
-              replace
-            />
-          )
-        )}
+  path="/quiz"
+  element={guarded(
+    quiz && !result ? (
+      <Quiz
+        questions={quiz}
+        sourceName={
+          quizMeta.name
+        }
+        difficulty={
+          quizMeta.difficulty
+        }
+        durationMinutes={
+          quizMeta.durationMinutes
+        }
+        onDone={(
+          r,
+          a
+        ) => {
+          setResult(r);
+          setAnswers(a);
+        }}
       />
+    ) : result ? (
+      <>
+        <Results
+          result={result}
+          questions={quiz || []}
+          answers={answers}
+        />
+
+        <Feedback />
+      </>
+    ) : (
+      <Navigate
+        to="/dashboard"
+        replace
+      />
+    )
+  )}
+/>
     </Routes>
   );
 }
