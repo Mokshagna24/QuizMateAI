@@ -3,14 +3,31 @@ from typing import List
 
 import numpy as np
 from fastapi import HTTPException
+from google import genai
 
 from ..schemas.models import QuizRequest
-from .ollama import ollama_post
-from ..core.config import OLLAMA_EMBED_MODEL
+from ..core.config import GEMINI_API_KEY, GEMINI_EMBED_MODEL
 
+
+# ============================================================
+# GEMINI CLIENT
+# ============================================================
+
+client = genai.Client(
+    api_key=GEMINI_API_KEY
+)
+
+
+# ============================================================
+# RAG CACHE
+# ============================================================
 
 RAG_CACHE = {}
 
+
+# ============================================================
+# TEXT CHUNKING
+# ============================================================
 
 def chunk_text(
     text: str,
@@ -61,22 +78,39 @@ def chunk_text(
 def embed_texts(
     texts: List[str],
 ):
+    """
+    Generate embeddings using Gemini.
+
+    """
+
     if not texts:
         return []
 
-    data = ollama_post(
-        "/api/embed",
-        {
-            "model": OLLAMA_EMBED_MODEL,
-            "input": texts,
-            "truncate": True,
-        },
-        timeout=300,
-    )
+    try:
 
-    embeddings = data.get(
-        "embeddings"
-    )
+        response = client.models.embed_content(
+            model=GEMINI_EMBED_MODEL,
+            contents=texts,
+        )
+
+        embeddings = [
+            embedding.values
+            for embedding in response.embeddings
+        ]
+
+    except Exception as exc:
+
+        print(
+            f"Gemini embedding error: {exc!r}"
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Gemini did not return valid embeddings. "
+                "Check the Gemini API key and embedding model."
+            ),
+        )
 
     if (
         not embeddings
@@ -85,13 +119,16 @@ def embed_texts(
         raise HTTPException(
             status_code=502,
             detail=(
-                "Ollama did not return valid embeddings. "
-                "Check nomic-embed-text."
+                "Gemini did not return valid embeddings."
             ),
         )
 
     return embeddings
 
+
+# ============================================================
+# COSINE SIMILARITY
+# ============================================================
 
 def cosine_similarity(
     a: np.ndarray,
@@ -109,6 +146,10 @@ def cosine_similarity(
         np.dot(a, b) / denom
     )
 
+
+# ============================================================
+# BUILD RAG INDEX
+# ============================================================
 
 def build_rag_index(
     source_text: str,
@@ -171,6 +212,10 @@ def build_rag_index(
 
     return index
 
+
+# ============================================================
+# RETRIEVE RELEVANT CONTEXT
+# ============================================================
 
 def retrieve_context(
     index,
@@ -239,6 +284,10 @@ def retrieve_context(
     return retrieved
 
 
+# ============================================================
+# BUILD RETRIEVAL QUERIES
+# ============================================================
+
 def build_retrieval_queries(
     req: QuizRequest,
 ):
@@ -284,6 +333,10 @@ def build_retrieval_queries(
         "Processes, examples, relationships, comparisons, formulas, and key facts.",
     ]
 
+
+# ============================================================
+# FORMAT RETRIEVED CONTEXT
+# ============================================================
 
 def format_retrieved_context(
     retrieved,

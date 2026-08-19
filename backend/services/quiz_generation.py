@@ -242,7 +242,7 @@ def generate_questions(
     # Example:
     # topic = "iot"
     #
-    # It directly sends "iot" to Ollama.
+    # It directly sends "iot" to Gemini.
     # ========================================================
 
     if req.topic and not req.source_text:

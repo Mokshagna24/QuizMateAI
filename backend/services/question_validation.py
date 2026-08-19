@@ -4,14 +4,14 @@ from fastapi import HTTPException
 
 from ..schemas.models import QuizQuestion
 from .json_utils import parse_ai_json
-from .ollama import call_ai 
+from .gemini import call_ai
 
 
 def normalize_question_item(
     item: dict,
 ):
     """
-    Normalize common Ollama mistakes before Pydantic validation.
+    Normalize common Gemini mistakes before Pydantic validation.
     """
 
     if not isinstance(item, dict):
@@ -244,27 +244,33 @@ def validate_questions(
                 )
                 continue
 
-            # Llama may return the correct MCQ answer as either:
+            # Gemini may return the correct MCQ answer as either:
             # 1) the option text, or
             # 2) a 1-based option number such as "1", "2", "3", "4".
             # Normalize both forms to the actual option text so the
             # existing scoring/frontend contract remains unchanged.
+
             answer_value = question.answer.strip()
 
             if answer_value in {"1", "2", "3", "4"}:
                 answer_index = int(answer_value) - 1
                 question.answer = question.options[answer_index]
+
                 print(
                     f"Normalized MCQ numeric answer {answer_value} "
                     f"to option {answer_index + 1}."
                 )
+
             elif answer_value.lower() in normalized_options:
                 # Preserve the existing answer text, normalized only by
                 # matching it to the canonical option spelling.
+
                 answer_index = normalized_options.index(
                     answer_value.lower()
                 )
+
                 question.answer = question.options[answer_index]
+
             else:
                 print(
                     "Skipping MCQ: "
@@ -348,12 +354,13 @@ def generate_validated_questions(
     max_attempts: int = 3,
 ):
     """
-    Ask Ollama for a quiz and retry when the model returns
+    Ask Gemini for a quiz and retry when the model returns
     malformed, incomplete, duplicate, or wrong-type questions.
 
     This keeps the existing validation rules but avoids failing
-    immediately when Llama produces only a few valid questions.
+    immediately when Gemini produces only a few valid questions.
     """
+
     last_valid_count = 0
     last_error = ""
 
@@ -406,7 +413,7 @@ Return ONLY the JSON object.
                 return validated[:requested_count]
 
             last_error = (
-                f"Llama returned {len(validated)} valid "
+                f"Gemini returned {len(validated)} valid "
                 f"questions out of {requested_count}."
             )
 
@@ -420,6 +427,7 @@ Return ONLY the JSON object.
 
         except Exception as exc:
             last_error = str(exc)
+
             print(
                 f"{mode} QUIZ RETRY {attempt}: "
                 f"AI response could not be parsed: {exc!r}"
@@ -428,7 +436,7 @@ Return ONLY the JSON object.
     raise HTTPException(
         status_code=502,
         detail=(
-            f"Llama generated only {last_valid_count} valid "
+            f"Gemini generated only {last_valid_count} valid "
             f"{selected_type} questions out of {requested_count} "
             f"after {max_attempts} attempts. "
             "Please try again."

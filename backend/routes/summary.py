@@ -1,11 +1,10 @@
 from fastapi import Depends, HTTPException
 
 from ..core.app import app
-from ..core.config import OLLAMA_MODEL
 from ..schemas.models import SummaryRequest
 from ..services.auth import current_user
 from ..services.json_utils import parse_ai_json
-from ..services.ollama import call_ai, ollama_post
+from ..services.gemini import call_ai
 
 
 @app.post("/api/summary")
@@ -84,68 +83,72 @@ DOCUMENT:
         ).strip()
 
         # ====================================================
-        # IMPORTANT FALLBACK
+        # GEMINI FALLBACK
         # ====================================================
 
         if not summary_text:
 
             print(
                 "SUMMARY JSON WAS EMPTY. "
-                "Retrying without JSON mode."
+                "Retrying with Gemini."
             )
 
-            fallback_payload = {
-                "model": OLLAMA_MODEL,
+            fallback_prompt = f"""
+You are a document summarization assistant.
 
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a document summarization "
-                            "assistant. Summarize only the supplied "
-                            "document. Do not invent information."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": f"""
-Summarize this document.
+Summarize ONLY the supplied document.
 
-Style:
+SUMMARY STYLE:
 {req.mode}
 
-Document:
+IMPORTANT:
+
+1. Use only information from the document.
+2. Do not invent information.
+3. Create a useful summary for studying.
+4. Return ONLY valid JSON.
+5. Do not return markdown.
+6. Do not return ```json.
+
+Return EXACTLY:
+
+{{
+  "summary": "Your complete summary here."
+}}
+
+DOCUMENT:
+
+<DOCUMENT>
 {text[:40000]}
-""",
-                    },
-                ],
+</DOCUMENT>
+"""
 
-                "stream": False,
-
-                "options": {
-                    "temperature": 0.2,
-                },
-            }
-
-            fallback_data = ollama_post(
-                "/api/chat",
-                fallback_payload,
-                timeout=300,
+            fallback_raw = call_ai(
+                fallback_prompt
             )
 
-            summary_text = (
-                fallback_data
-                .get("message", {})
-                .get("content", "")
-                .strip()
+            fallback_parsed = parse_ai_json(
+                fallback_raw
             )
+
+            if isinstance(
+                fallback_parsed,
+                dict,
+            ):
+
+                summary_text = str(
+                    fallback_parsed.get(
+                        "summary",
+                        "",
+                    )
+                ).strip()
 
         if not summary_text:
 
             raise HTTPException(
                 status_code=502,
                 detail=(
-                    "Ollama returned an empty summary."
+                    "Gemini returned an empty summary."
                 ),
             )
 
